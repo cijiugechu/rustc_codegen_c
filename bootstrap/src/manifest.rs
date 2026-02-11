@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anstream::eprintln as println;
@@ -21,11 +21,16 @@ impl Manifest {
     }
 
     /// The path to the rustc codegen c library
-    pub fn codegen_backend(&self) -> &'static Path {
+    pub fn codegen_backend(&self) -> PathBuf {
+        let filename = format!(
+            "{}rustc_codegen_c{}",
+            std::env::consts::DLL_PREFIX,
+            std::env::consts::DLL_SUFFIX
+        );
         if self.release {
-            Path::new("crates/target/release/librustc_codegen_c.so")
+            PathBuf::from("crates/target/release").join(filename)
         } else {
-            Path::new("crates/target/debug/librustc_codegen_c.so")
+            PathBuf::from("crates/target/debug").join(filename)
         }
     }
 
