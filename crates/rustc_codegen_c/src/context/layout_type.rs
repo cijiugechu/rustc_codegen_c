@@ -1,19 +1,19 @@
-use rustc_abi::Abi;
+use rustc_abi::BackendRepr;
 use rustc_codegen_c_ast::ty::CTy;
-use rustc_codegen_ssa::traits::LayoutTypeMethods;
+use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::Ty;
-use rustc_target::abi::call::FnAbi;
+use rustc_target::callconv::FnAbi;
 use rustc_type_ir::TyKind;
 
 use crate::context::CodegenCx;
 
-impl<'tcx, 'mx> LayoutTypeMethods<'tcx> for CodegenCx<'tcx, 'mx> {
+impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
         todo!()
     }
 
-    fn cast_backend_type(&self, ty: &rustc_target::abi::call::CastTarget) -> Self::Type {
+    fn cast_backend_type(&self, ty: &rustc_target::callconv::CastTarget) -> Self::Type {
         todo!()
     }
 
@@ -25,7 +25,7 @@ impl<'tcx, 'mx> LayoutTypeMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         todo!()
     }
 
-    fn reg_backend_type(&self, ty: &rustc_target::abi::call::Reg) -> Self::Type {
+    fn reg_backend_type(&self, ty: &rustc_abi::Reg) -> Self::Type {
         todo!()
     }
 
@@ -38,9 +38,9 @@ impl<'tcx, 'mx> LayoutTypeMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn is_backend_immediate(&self, layout: TyAndLayout<'tcx>) -> bool {
-        match layout.abi {
-            Abi::Scalar(_) | Abi::Vector { .. } => true,
-            Abi::ScalarPair(..) | Abi::Uninhabited | Abi::Aggregate { .. } => false,
+        match layout.backend_repr {
+            BackendRepr::Scalar(_) | BackendRepr::SimdVector { .. } => true,
+            BackendRepr::ScalarPair(..) | BackendRepr::Memory { .. } => false,
         }
     }
 

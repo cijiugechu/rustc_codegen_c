@@ -1,19 +1,19 @@
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_ssa::mir::place::PlaceRef;
-use rustc_codegen_ssa::traits::{AbiBuilderMethods, ArgAbiMethods};
+use rustc_codegen_ssa::traits::{AbiBuilderMethods, ArgAbiBuilderMethods};
 use rustc_middle::ty::Ty;
-use rustc_target::abi::call::ArgAbi;
+use rustc_target::callconv::ArgAbi;
 
 use crate::builder::Builder;
 
-impl<'tcx, 'mx> AbiBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
+impl<'tcx, 'mx> AbiBuilderMethods for Builder<'_, 'tcx, 'mx> {
     fn get_param(&mut self, index: usize) -> Self::Value {
         // Params are first n variables in the function
         CValue::Local(index)
     }
 }
 
-impl<'tcx, 'mx> ArgAbiMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
+impl<'tcx, 'mx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
     fn store_fn_arg(
         &mut self,
         arg_abi: &ArgAbi<'tcx, Ty<'tcx>>,
@@ -29,10 +29,6 @@ impl<'tcx, 'mx> ArgAbiMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
         val: Self::Value,
         dst: PlaceRef<'tcx, Self::Value>,
     ) {
-        todo!()
-    }
-
-    fn arg_memory_ty(&self, arg_abi: &ArgAbi<'tcx, Ty<'tcx>>) -> Self::Type {
         todo!()
     }
 }

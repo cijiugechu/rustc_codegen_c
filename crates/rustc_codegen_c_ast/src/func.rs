@@ -47,7 +47,7 @@ impl<'mx> CFuncKind<'mx> {
     }
 
     /// Get a new unique local variable.
-    pub fn next_local_var(&self) -> CValue {
+    pub fn next_local_var(&self) -> CValue<'_> {
         let val = CValue::Local(self.local_var_counter.get());
         self.local_var_counter.set(self.local_var_counter.get() + 1);
         val

@@ -174,7 +174,7 @@ impl CUintTy {
 /// Complex C types, e.g. pointers and arrays.
 ///
 /// This type is interned, and thus should be unique in a specific context.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CTyKind<'mx> {
     /// A pointer type.
     Pointer(CTy<'mx>),

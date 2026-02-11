@@ -1,16 +1,16 @@
 use rustc_codegen_ssa::mir::debuginfo::{FunctionDebugContext, VariableKind};
-use rustc_codegen_ssa::traits::DebugInfoMethods;
+use rustc_codegen_ssa::traits::DebugInfoCodegenMethods;
 use rustc_middle::mir::Body;
-use rustc_middle::ty::{Instance, PolyExistentialTraitRef, Ty};
-use rustc_target::abi::call::FnAbi;
+use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
+use rustc_target::callconv::FnAbi;
 
 use crate::context::CodegenCx;
 
-impl<'tcx, 'mx> DebugInfoMethods<'tcx> for CodegenCx<'tcx, 'mx> {
+impl<'tcx, 'mx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn create_vtable_debuginfo(
         &self,
         ty: Ty<'tcx>,
-        trait_ref: Option<PolyExistentialTraitRef<'tcx>>,
+        trait_ref: Option<ExistentialTraitRef<'tcx>>,
         vtable: Self::Value,
     ) {
         todo!()

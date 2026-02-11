@@ -1,17 +1,16 @@
 use std::cell::RefCell;
 
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_ssa::traits::MiscMethods;
+use rustc_codegen_ssa::traits::MiscCodegenMethods;
 use rustc_hash::FxHashMap;
-use rustc_middle::mir::mono::CodegenUnit;
-use rustc_middle::ty::{Instance, PolyExistentialTraitRef, Ty};
+use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
 
 use crate::context::CodegenCx;
 
-impl<'tcx, 'mx> MiscMethods<'tcx> for CodegenCx<'tcx, 'mx> {
+impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn vtables(
         &self,
-    ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<PolyExistentialTraitRef<'tcx>>), Self::Value>> {
+    ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), Self::Value>> {
         todo!()
     }
 
@@ -27,16 +26,12 @@ impl<'tcx, 'mx> MiscMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         CValue::Func(func.0.name)
     }
 
-    fn eh_personality(&self) -> Self::Value {
+    fn eh_personality(&self) -> Self::Function {
         todo!()
     }
 
     fn sess(&self) -> &rustc_session::Session {
         self.tcx.sess
-    }
-
-    fn codegen_unit(&self) -> &'tcx CodegenUnit<'tcx> {
-        todo!()
     }
 
     fn set_frame_pointer_type(&self, llfn: Self::Function) {

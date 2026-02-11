@@ -4,13 +4,14 @@ use std::ops::Deref;
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::func::CFunc;
-use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, HasCodegen};
+use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods};
+use rustc_middle::ty;
 use rustc_middle::ty::layout::{
-    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasParamEnv, HasTyCtxt, LayoutError, LayoutOfHelpers,
-    TyAndLayout,
+    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, HasTypingEnv, LayoutError,
+    LayoutOfHelpers, TyAndLayout,
 };
-use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
-use rustc_target::abi::call::FnAbi;
+use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 
 use crate::context::CodegenCx;
@@ -39,10 +40,6 @@ impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
     }
 }
 
-impl<'tcx, 'mx> HasCodegen<'tcx> for Builder<'_, 'tcx, 'mx> {
-    type CodegenCx = CodegenCx<'tcx, 'mx>;
-}
-
 impl<'tcx, 'mx> HasDataLayout for Builder<'_, 'tcx, 'mx> {
     fn data_layout(&self) -> &TargetDataLayout {
         todo!()
@@ -55,14 +52,15 @@ impl<'tcx, 'mx> HasTyCtxt<'tcx> for Builder<'_, 'tcx, 'mx> {
     }
 }
 
-impl<'tcx, 'mx> HasParamEnv<'tcx> for Builder<'_, 'tcx, 'mx> {
-    fn param_env(&self) -> ParamEnv<'tcx> {
-        self.cx.param_env()
+impl<'tcx, 'mx> HasTypingEnv<'tcx> for Builder<'_, 'tcx, 'mx> {
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        self.cx.typing_env()
     }
 }
 
 impl<'tcx, 'mx> BackendTypes for Builder<'_, 'tcx, 'mx> {
     type Value = <CodegenCx<'tcx, 'mx> as BackendTypes>::Value;
+    type Metadata = <CodegenCx<'tcx, 'mx> as BackendTypes>::Metadata;
     type Function = <CodegenCx<'tcx, 'mx> as BackendTypes>::Function;
     type BasicBlock = <CodegenCx<'tcx, 'mx> as BackendTypes>::BasicBlock;
     type Type = <CodegenCx<'tcx, 'mx> as BackendTypes>::Type;
@@ -101,6 +99,7 @@ impl<'tcx, 'mx> FnAbiOfHelpers<'tcx> for Builder<'_, 'tcx, 'mx> {
 }
 
 impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
+    type CodegenCx = CodegenCx<'tcx, 'mx>;
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
         Self { cx, bb: llbb }
     }
@@ -163,7 +162,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         &mut self,
         llty: Self::Type,
         fn_attrs: Option<&rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs>,
-        fn_abi: Option<&rustc_target::abi::call::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>>,
+        fn_abi: Option<&rustc_target::callconv::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>>,
         llfn: Self::Value,
         args: &[Self::Value],
         then: Self::BasicBlock,
@@ -356,10 +355,6 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         todo!()
     }
 
-    fn dynamic_alloca(&mut self, size: Self::Value, align: rustc_abi::Align) -> Self::Value {
-        todo!()
-    }
-
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: rustc_abi::Align) -> Self::Value {
         todo!()
     }
@@ -372,7 +367,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         &mut self,
         ty: Self::Type,
         ptr: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: rustc_middle::ty::AtomicOrdering,
         size: rustc_abi::Size,
     ) -> Self::Value {
         todo!()
@@ -425,7 +420,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         &mut self,
         val: Self::Value,
         ptr: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: rustc_middle::ty::AtomicOrdering,
         size: rustc_abi::Size,
     ) {
         todo!()
@@ -615,15 +610,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         todo!()
     }
 
-    fn set_personality_fn(&mut self, personality: Self::Value) {
+    fn set_personality_fn(&mut self, personality: Self::Function) {
         todo!()
     }
 
-    fn cleanup_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
+    fn cleanup_landing_pad(&mut self, pers_fn: Self::Function) -> (Self::Value, Self::Value) {
         todo!()
     }
 
-    fn filter_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value) {
+    fn filter_landing_pad(&mut self, pers_fn: Self::Function) {
         todo!()
     }
 
@@ -657,8 +652,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         dst: Self::Value,
         cmp: Self::Value,
         src: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
-        failure_order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: rustc_middle::ty::AtomicOrdering,
+        failure_order: rustc_middle::ty::AtomicOrdering,
         weak: bool,
     ) -> (Self::Value, Self::Value) {
         todo!()
@@ -669,14 +664,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         op: rustc_codegen_ssa::common::AtomicRmwBinOp,
         dst: Self::Value,
         src: Self::Value,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: rustc_middle::ty::AtomicOrdering,
+        ret_ptr: bool,
     ) -> Self::Value {
         todo!()
     }
 
     fn atomic_fence(
         &mut self,
-        order: rustc_codegen_ssa::common::AtomicOrdering,
+        order: rustc_middle::ty::AtomicOrdering,
         scope: rustc_codegen_ssa::common::SynchronizationScope,
     ) {
         todo!()
@@ -694,27 +690,17 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         todo!()
     }
 
-    fn instrprof_increment(
-        &mut self,
-        fn_name: Self::Value,
-        hash: Self::Value,
-        num_counters: Self::Value,
-        index: Self::Value,
-    ) {
-        todo!()
-    }
-
     fn call(
         &mut self,
         llty: Self::Type,
         fn_attrs: Option<&rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs>,
-        fn_abi: Option<&rustc_target::abi::call::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>>,
+        fn_abi: Option<&rustc_target::callconv::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>>,
         llfn: Self::Value,
         args: &[Self::Value],
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
-        use crate::rustc_codegen_ssa::traits::LayoutTypeMethods;
+        use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 
         let fn_abi = fn_abi.unwrap();
         let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
@@ -727,6 +713,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
 
         ret
+    }
+
+    fn tail_call(
+        &mut self,
+        llty: Self::Type,
+        fn_attrs: Option<&rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs>,
+        fn_abi: &rustc_target::callconv::FnAbi<'tcx, rustc_middle::ty::Ty<'tcx>>,
+        llfn: Self::Value,
+        args: &[Self::Value],
+        funclet: Option<&Self::Funclet>,
+        instance: Option<rustc_middle::ty::Instance<'tcx>>,
+    ) {
+        todo!()
     }
 
     fn zext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {

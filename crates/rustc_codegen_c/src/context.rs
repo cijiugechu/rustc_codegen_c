@@ -1,5 +1,7 @@
 #![allow(unused_variables)] // TODO
 
+use rustc_middle::ty;
+use rustc_middle::ty::layout::HasTypingEnv;
 use std::cell::RefCell;
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
@@ -10,11 +12,10 @@ use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::BackendTypes;
 use rustc_hash::FxHashMap;
 use rustc_middle::ty::layout::{
-    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasParamEnv, HasTyCtxt, LayoutError, LayoutOfHelpers,
-    TyAndLayout,
+    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOfHelpers, TyAndLayout,
 };
-use rustc_middle::ty::{Instance, ParamEnv, Ty, TyCtxt};
-use rustc_target::abi::call::FnAbi;
+use rustc_middle::ty::{Instance, Ty, TyCtxt};
+use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 
 mod asm;
@@ -48,6 +49,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
 impl<'tcx, 'mx> BackendTypes for CodegenCx<'tcx, 'mx> {
     type Value = CValue<'mx>;
+    type Metadata = CValue<'mx>;
     type Function = CFunc<'mx>;
     type BasicBlock = CFunc<'mx>;
     type Type = CTy<'mx>;
@@ -63,9 +65,9 @@ impl<'tcx, 'mx> HasTargetSpec for CodegenCx<'tcx, 'mx> {
     }
 }
 
-impl<'tcx, 'mx> HasParamEnv<'tcx> for CodegenCx<'tcx, 'mx> {
-    fn param_env(&self) -> ParamEnv<'tcx> {
-        ParamEnv::reveal_all()
+impl<'tcx, 'mx> HasTypingEnv<'tcx> for CodegenCx<'tcx, 'mx> {
+    fn typing_env(&self) -> ty::TypingEnv<'tcx> {
+        ty::TypingEnv::fully_monomorphized()
     }
 }
 
@@ -77,7 +79,7 @@ impl<'tcx, 'mx> HasTyCtxt<'tcx> for CodegenCx<'tcx, 'mx> {
 
 impl<'tcx, 'mx> HasDataLayout for CodegenCx<'tcx, 'mx> {
     fn data_layout(&self) -> &TargetDataLayout {
-        todo!()
+        &self.tcx.data_layout
     }
 }
 

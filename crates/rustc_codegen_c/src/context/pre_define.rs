@@ -1,16 +1,18 @@
+use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_codegen_c_ast::func::CFuncKind;
-use rustc_codegen_ssa::traits::{LayoutTypeMethods, PreDefineMethods};
+use rustc_codegen_ssa::traits::PreDefineCodegenMethods;
 use rustc_data_structures::intern::Interned;
+use rustc_hir::attrs::Linkage;
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::mono::{Linkage, Visibility};
+use rustc_middle::mir::mono::Visibility;
 use rustc_middle::ty::layout::FnAbiOf;
 use rustc_middle::ty::{self, Instance};
 
 use crate::context::CodegenCx;
 
-impl<'tcx, 'mx> PreDefineMethods<'tcx> for CodegenCx<'tcx, 'mx> {
+impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn predefine_static(
-        &self,
+        &mut self,
         def_id: DefId,
         linkage: Linkage,
         visibility: Visibility,
@@ -20,7 +22,7 @@ impl<'tcx, 'mx> PreDefineMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn predefine_fn(
-        &self,
+        &mut self,
         instance: Instance<'tcx>,
         linkage: Linkage,
         visibility: Visibility,

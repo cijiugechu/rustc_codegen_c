@@ -46,9 +46,9 @@ impl PrinterCtx {
     ///
     /// See the module document of [`rustc_ast_pretty::pp`] for details.
     pub(crate) fn ibox(&mut self, indent: isize, op: impl FnOnce(&mut Self)) {
-        self.pp.ibox(indent);
+        let marker = self.pp.ibox(indent);
         op(self);
-        self.pp.end();
+        self.pp.end(marker);
     }
 
     /// Inconsistent breaking box, with delimiters surrounding the inner content
@@ -74,9 +74,9 @@ impl PrinterCtx {
     ///
     /// See the module document of [`rustc_ast_pretty::pp`] for details.
     pub(crate) fn cbox(&mut self, indent: isize, op: impl FnOnce(&mut Self)) {
-        self.pp.cbox(indent);
+        let marker = self.pp.cbox(indent);
         op(self);
-        self.pp.end();
+        self.pp.end(marker);
     }
 
     /// Consistent breaking box, with delimiters surrounding the inner content
@@ -100,9 +100,9 @@ impl PrinterCtx {
     }
 
     pub(crate) fn valign(&mut self, op: impl FnOnce(&mut Self)) {
-        self.pp.visual_align();
+        let marker = self.pp.visual_align();
         op(self);
-        self.pp.end();
+        self.pp.end(marker);
     }
 
     pub(crate) fn valign_delim(

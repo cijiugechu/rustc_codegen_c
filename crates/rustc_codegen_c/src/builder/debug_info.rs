@@ -29,4 +29,8 @@ impl DebugInfoBuilderMethods for Builder<'_, '_, '_> {
     fn set_var_name(&mut self, value: Self::Value, name: &str) {
         todo!()
     }
+
+    fn clear_dbg_loc(&mut self) {
+        todo!()
+    }
 }

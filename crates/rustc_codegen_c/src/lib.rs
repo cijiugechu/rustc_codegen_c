@@ -18,11 +18,11 @@ extern crate rustc_target;
 extern crate rustc_type_ir;
 extern crate tracing;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rustc_ast::expand::allocator::AllocatorKind;
-use rustc_codegen_ssa::back::link::link_binary;
-use rustc_codegen_ssa::back::lto::{LtoModuleCodegen, SerializedModule, ThinModule};
+use rustc_codegen_ssa::back::lto::{SerializedModule, ThinModule};
 use rustc_codegen_ssa::back::write::{
     CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen, TargetMachineFactoryFn,
 };
@@ -33,14 +33,12 @@ use rustc_codegen_ssa::traits::{
 };
 use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen};
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::{DiagCtxtHandle, FatalError};
-use rustc_metadata::EncodedMetadata;
+use rustc_errors::DiagCtxtHandle;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
 use rustc_middle::ty::TyCtxt;
 use rustc_middle::util::Providers;
 use rustc_session::config::{OptLevel, OutputFilenames};
 use rustc_session::Session;
-use rustc_span::ErrorGuaranteed;
 
 mod archive;
 mod base;
@@ -62,20 +60,14 @@ impl CodegenBackend for CCodegen {
         providers.global_backend_features = |_tcx, ()| vec![]
     }
 
-    fn codegen_crate(
-        &self,
-        tcx: TyCtxt<'_>,
-        metadata: EncodedMetadata,
-        need_metadata_module: bool,
-    ) -> Box<dyn std::any::Any> {
+    fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn std::any::Any> {
         let target_cpu = match tcx.sess.opts.cg.target_cpu {
             Some(ref name) => name,
             None => tcx.sess.target.cpu.as_ref(),
         }
         .to_owned();
 
-        let ongoing_codegen =
-            codegen_crate(self.clone(), tcx, target_cpu, metadata, need_metadata_module);
+        let ongoing_codegen = codegen_crate(self.clone(), tcx, target_cpu);
         Box::new(ongoing_codegen)
     }
 
@@ -87,22 +79,13 @@ impl CodegenBackend for CCodegen {
     ) -> (CodegenResults, FxIndexMap<WorkProductId, WorkProduct>) {
         ongoing_codegen.downcast::<OngoingCodegen<Self>>().expect("expected CCodegen").join(sess)
     }
-
-    fn link(
-        &self,
-        sess: &Session,
-        codegen_results: CodegenResults,
-        outputs: &OutputFilenames,
-    ) -> Result<(), ErrorGuaranteed> {
-        link_binary(sess, &crate::archive::ArArchiveBuilderBuilder, &codegen_results, outputs)
-    }
-
-    fn supports_parallel(&self) -> bool {
-        false
-    }
 }
 
 impl ExtraBackendMethods for CCodegen {
+    fn supports_parallel(&self) -> bool {
+        false
+    }
+
     fn codegen_allocator(
         &self,
         _tcx: TyCtxt<'_>,
@@ -145,10 +128,6 @@ impl ThinBufferMethods for ThinBuffer {
     fn data(&self) -> &[u8] {
         unimplemented!()
     }
-
-    fn thin_link_data(&self) -> &[u8] {
-        unimplemented!()
-    }
 }
 
 impl WriteBackendMethods for CCodegen {
@@ -159,30 +138,22 @@ impl WriteBackendMethods for CCodegen {
     type ThinData = ();
     type ThinBuffer = ThinBuffer;
 
-    fn run_link(
-        cgcx: &CodegenContext<Self>,
-        dcx: DiagCtxtHandle<'_>,
-        modules: Vec<ModuleCodegen<Self::Module>>,
-    ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
-        write::link(cgcx, dcx, modules)
-    }
-
-    fn run_fat_lto(
+    fn run_and_optimize_fat_lto(
         _cgcx: &CodegenContext<Self>,
+        _exported_symbols_for_lto: &[String],
+        _each_linked_rlib_for_lto: &[PathBuf],
         _modules: Vec<FatLtoInput<Self>>,
-        _cached_modules: Vec<(SerializedModule<Self::ModuleBuffer>, WorkProduct)>,
-    ) -> Result<LtoModuleCodegen<Self>, FatalError> {
+    ) -> ModuleCodegen<Self::Module> {
         unimplemented!()
     }
 
     fn run_thin_lto(
         _cgcx: &CodegenContext<Self>,
+        _exported_symbols_for_lto: &[String],
+        _each_linked_rlib_for_lto: &[PathBuf],
         _modules: Vec<(String, Self::ThinBuffer)>,
-        _cached_modules: Vec<(
-            SerializedModule<Self::ModuleBuffer>,
-            rustc_middle::dep_graph::WorkProduct,
-        )>,
-    ) -> Result<(Vec<LtoModuleCodegen<Self>>, Vec<WorkProduct>), rustc_errors::FatalError> {
+        _cached_modules: Vec<(SerializedModule<Self::ModuleBuffer>, WorkProduct)>,
+    ) -> (Vec<ThinModule<Self>>, Vec<WorkProduct>) {
         unimplemented!()
     }
 
@@ -194,42 +165,30 @@ impl WriteBackendMethods for CCodegen {
         unimplemented!()
     }
 
-    unsafe fn optimize(
+    fn optimize(
         _cgcx: &CodegenContext<Self>,
         _dcx: DiagCtxtHandle<'_>,
-        _module: &ModuleCodegen<Self::Module>,
+        _module: &mut ModuleCodegen<Self::Module>,
         _config: &ModuleConfig,
-    ) -> Result<(), FatalError> {
-        Ok(())
+    ) {
     }
 
-    fn optimize_fat(
-        _cgcx: &CodegenContext<Self>,
-        _llmod: &mut ModuleCodegen<Self::Module>,
-    ) -> Result<(), FatalError> {
-        unimplemented!()
-    }
-
-    unsafe fn optimize_thin(
+    fn optimize_thin(
         _cgcx: &CodegenContext<Self>,
         _thin: ThinModule<Self>,
-    ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
+    ) -> ModuleCodegen<Self::Module> {
         unimplemented!()
     }
 
-    unsafe fn codegen(
+    fn codegen(
         cgcx: &CodegenContext<Self>,
-        dcx: DiagCtxtHandle<'_>,
         module: ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
-    ) -> Result<CompiledModule, FatalError> {
-        write::codegen(cgcx, dcx, module, config)
+    ) -> CompiledModule {
+        write::codegen(cgcx, module, config)
     }
 
-    fn prepare_thin(
-        _module: ModuleCodegen<Self::Module>,
-        _want_summary: bool,
-    ) -> (String, Self::ThinBuffer) {
+    fn prepare_thin(_module: ModuleCodegen<Self::Module>) -> (String, Self::ThinBuffer) {
         unimplemented!()
     }
 

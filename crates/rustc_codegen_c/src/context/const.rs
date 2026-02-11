@@ -1,10 +1,10 @@
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_ssa::traits::ConstMethods;
+use rustc_codegen_ssa::traits::ConstCodegenMethods;
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 
 use crate::context::CodegenCx;
 
-impl<'tcx, 'mx> ConstMethods<'tcx> for CodegenCx<'tcx, 'mx> {
+impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
         todo!()
     }
@@ -85,14 +85,14 @@ impl<'tcx, 'mx> ConstMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         todo!()
     }
 
-    fn const_data_from_alloc(&self, alloc: ConstAllocation<'tcx>) -> Self::Value {
+    fn const_data_from_alloc(&self, alloc: ConstAllocation<'_>) -> Self::Value {
         todo!()
     }
 
     fn scalar_to_backend(
         &self,
         cv: Scalar,
-        layout: rustc_target::abi::Scalar,
+        layout: rustc_abi::Scalar,
         llty: Self::Type,
     ) -> Self::Value {
         match cv {
@@ -101,11 +101,10 @@ impl<'tcx, 'mx> ConstMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         }
     }
 
-    fn const_ptr_byte_offset(
-        &self,
-        val: Self::Value,
-        offset: rustc_target::abi::Size,
-    ) -> Self::Value {
+    fn const_ptr_byte_offset(&self, val: Self::Value, offset: rustc_abi::Size) -> Self::Value {
+        todo!()
+    }
+    fn const_vector(&self, _: &[Self::Value]) -> Self::Value {
         todo!()
     }
 }
