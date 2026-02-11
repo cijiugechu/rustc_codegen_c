@@ -14,6 +14,12 @@ pub trait Sized: MetaSized {}
 #[lang = "copy"]
 pub trait Copy {}
 
+#[lang = "add"]
+pub trait Add<Rhs = Self> {
+    type Output;
+    fn add(self, rhs: Rhs) -> Self::Output;
+}
+
 impl Copy for bool {}
 impl Copy for u8 {}
 impl Copy for u16 {}
@@ -30,6 +36,22 @@ impl Copy for char {}
 impl<'a, T: ?Sized> Copy for &'a T {}
 impl<T: ?Sized> Copy for *const T {}
 impl<T: ?Sized> Copy for *mut T {}
+
+macro_rules! impl_add_for_int {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl Add for $ty {
+                type Output = $ty;
+
+                fn add(self, rhs: $ty) -> $ty {
+                    self + rhs
+                }
+            }
+        )*
+    };
+}
+
+impl_add_for_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
 pub mod libc {
     #[link(name = "c")]

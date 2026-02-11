@@ -43,6 +43,7 @@ impl Manifest {
             .arg(format!("codegen-backend={}", self.codegen_backend().display()))
             .args(["-C", "panic=abort"])
             .args(["-C", "lto=false"])
+            .args(["-C", "overflow-checks=off"])
             .arg(format!("-Lall={}", self.out_dir.display()))
             .env("CFLAGS", "-Irust_runtime")
             .arg("-lc")

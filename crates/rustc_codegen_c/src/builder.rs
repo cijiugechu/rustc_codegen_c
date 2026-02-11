@@ -3,8 +3,11 @@
 use std::ops::Deref;
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
+use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::CFunc;
+use rustc_codegen_c_ast::ty::CTy;
 use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods};
+use rustc_hash::FxHashMap;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, HasTypingEnv, LayoutError,
@@ -30,6 +33,7 @@ pub struct Builder<'a, 'tcx, 'mx> {
     /// The associated codegen context.
     pub cx: &'a CodegenCx<'tcx, 'mx>,
     bb: CFunc<'mx>,
+    value_tys: FxHashMap<CValue<'mx>, CTy<'mx>>,
 }
 
 impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
@@ -98,10 +102,44 @@ impl<'tcx, 'mx> FnAbiOfHelpers<'tcx> for Builder<'_, 'tcx, 'mx> {
     }
 }
 
+impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
+    fn record_value_ty(&mut self, value: CValue<'mx>, ty: CTy<'mx>) {
+        if !matches!(value, CValue::Scalar(_)) {
+            self.value_tys.insert(value, ty);
+        }
+    }
+
+    fn value_ty(&self, value: CValue<'mx>) -> Option<CTy<'mx>> {
+        match value {
+            CValue::Scalar(_) => None,
+            _ => self.value_tys.get(&value).copied(),
+        }
+    }
+
+    fn infer_integer_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
+        let ty = match (self.value_ty(lhs), self.value_ty(rhs)) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => lhs,
+            (Some(lhs), Some(rhs)) => panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}"),
+            (Some(lhs), None) => lhs,
+            (None, Some(rhs)) => rhs,
+            (None, None) => panic!("cannot infer operand type for {op}"),
+        };
+
+        match ty {
+            CTy::Int(_) | CTy::UInt(_) => ty,
+            _ => panic!("unsupported type for {op}: {ty:?}"),
+        }
+    }
+}
+
 impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     type CodegenCx = CodegenCx<'tcx, 'mx>;
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
-        Self { cx, bb: llbb }
+        let mut value_tys = FxHashMap::default();
+        for (ty, value) in llbb.0.params.iter() {
+            value_tys.insert(*value, *ty);
+        }
+        Self { cx, bb: llbb, value_tys }
     }
 
     fn cx(&self) -> &Self::CodegenCx {
@@ -178,7 +216,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "add");
+        let ret = self.bb.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "+");
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn fadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -521,6 +564,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             );
         }
         self.bb.0.push_stmt(mcx.decl_stmt(mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
         ret
     }
 
@@ -711,6 +755,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let ret = self.bb.0.next_local_var();
 
         self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
+        self.record_value_ty(ret, ret_ty);
 
         ret
     }
