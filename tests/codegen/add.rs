@@ -11,6 +11,8 @@
 extern crate mini_core;
 
 // CHECK-LABEL: add
+// CHECK-LABEL: main
+// CHECK-LABEL: add
 // CHECK: int32_t _{{[0-9]+}} = (_0 + _1);
 // CHECK: return _{{[0-9]+}};
 #[no_mangle]
