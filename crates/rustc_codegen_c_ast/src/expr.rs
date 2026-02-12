@@ -41,6 +41,10 @@ pub enum CExprKind<'mx> {
         arrow: bool,
         field: &'mx str,
     },
+    /// A unary operation expression, e.g. `*x` or `&x`.
+    Unary { op: &'static str, expr: CExpr<'mx> },
+    /// An array indexing expression, e.g. `foo[1]`.
+    Index { expr: CExpr<'mx>, index: CExpr<'mx> },
 }
 
 impl<'mx> ModuleCtx<'mx> {
@@ -77,6 +81,16 @@ impl<'mx> ModuleCtx<'mx> {
     /// Create a new member access expression.
     pub fn member(&self, expr: CExpr<'mx>, field: &'mx str) -> CExpr<'mx> {
         self.expr(CExprKind::Member { expr, field, arrow: false })
+    }
+
+    /// Create a new unary expression.
+    pub fn unary(&self, op: &'static str, expr: CExpr<'mx>) -> CExpr<'mx> {
+        self.expr(CExprKind::Unary { op, expr })
+    }
+
+    /// Create a new indexing expression.
+    pub fn index(&self, expr: CExpr<'mx>, index: CExpr<'mx>) -> CExpr<'mx> {
+        self.expr(CExprKind::Index { expr, index })
     }
 }
 
@@ -127,6 +141,16 @@ impl Print for CExpr<'_> {
                     ctx.word(".");
                 }
                 ctx.word(field.to_string());
+            }),
+            CExprKind::Unary { op, expr } => ctx.cbox(INDENT, |ctx| {
+                ctx.word(*op);
+                expr.print_to(ctx);
+            }),
+            CExprKind::Index { expr, index } => ctx.cbox(INDENT, |ctx| {
+                expr.print_to(ctx);
+                ctx.word("[");
+                index.print_to(ctx);
+                ctx.word("]");
             }),
         }
     }

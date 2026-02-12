@@ -32,6 +32,23 @@ pub trait Mul<Rhs = Self> {
     fn mul(self, rhs: Rhs) -> Self::Output;
 }
 
+#[lang = "index"]
+pub trait Index<Idx> {
+    type Output: ?Sized;
+    fn index(&self, index: Idx) -> &Self::Output;
+}
+
+#[lang = "index_mut"]
+pub trait IndexMut<Idx>: Index<Idx> {
+    fn index_mut(&mut self, index: Idx) -> &mut Self::Output;
+}
+
+#[lang = "legacy_receiver"]
+pub trait LegacyReceiver {}
+
+impl<T: ?Sized> LegacyReceiver for &T {}
+impl<T: ?Sized> LegacyReceiver for &mut T {}
+
 impl Copy for bool {}
 impl Copy for u8 {}
 impl Copy for u16 {}
@@ -97,6 +114,24 @@ macro_rules! impl_mul_for_int {
 }
 
 impl_mul_for_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
+impl<T, const N: usize> Index<usize> for [T; N] {
+    type Output = T;
+
+    fn index(&self, _index: usize) -> &T {
+        // This test mini_core only provides the lang items needed by type checking.
+        // Actual array indexing semantics are lowered directly by rustc_codegen_c,
+        // so these trait methods are intentionally never used at runtime.
+        loop {}
+    }
+}
+
+impl<T, const N: usize> IndexMut<usize> for [T; N] {
+    fn index_mut(&mut self, _index: usize) -> &mut T {
+        // See the note in Index::index above.
+        loop {}
+    }
+}
 
 pub mod libc {
     #[link(name = "c")]

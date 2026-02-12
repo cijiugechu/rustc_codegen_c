@@ -6,7 +6,7 @@ use rustc_abi::{HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::CFunc;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods};
+use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, ConstCodegenMethods};
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
 use rustc_middle::ty;
@@ -130,6 +130,17 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             CTy::Int(_) | CTy::UInt(_) => ty,
             _ => panic!("unsupported type for {op}: {ty:?}"),
         }
+    }
+
+    fn require_const_usize(&self, value: CValue<'mx>, op: &str) -> usize {
+        match self.cx.const_to_opt_uint(value) {
+            Some(i) => i as usize,
+            None => panic!("{op} only supports constant unsigned indices"),
+        }
+    }
+
+    fn pointer_to(&self, pointee: CTy<'mx>) -> CTy<'mx> {
+        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
     }
 }
 
@@ -433,7 +444,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: rustc_abi::Align) -> Self::Value {
-        todo!()
+        let expr = self.mcx.unary("*", self.mcx.value(ptr));
+
+        let ret = self.bb.0.next_local_var();
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn volatile_load(&mut self, ty: Self::Type, ptr: Self::Value) -> Self::Value {
@@ -454,7 +470,21 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         &mut self,
         place: rustc_codegen_ssa::mir::place::PlaceRef<'tcx, Self::Value>,
     ) -> rustc_codegen_ssa::mir::operand::OperandRef<'tcx, Self::Value> {
-        todo!()
+        use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
+        use rustc_codegen_ssa::mir::operand::{OperandRef, OperandValue};
+
+        let layout = place.layout;
+        if layout.is_zst() {
+            return OperandRef::zero_sized(layout);
+        }
+
+        if self.cx.is_backend_immediate(layout) {
+            let llty = self.cx.immediate_backend_type(layout);
+            let val = self.load(llty, place.val.llval, place.val.align);
+            return OperandRef { val: OperandValue::Immediate(val), layout };
+        }
+
+        OperandRef { val: OperandValue::Ref(place.val), layout }
     }
 
     fn write_operand_repeatedly(
@@ -480,6 +510,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         align: rustc_abi::Align,
     ) -> Self::Value {
+        let lhs = self.mcx.unary("*", self.mcx.value(ptr));
+        let assign = self.mcx.binary(lhs, self.mcx.value(val), "=");
+        self.bb.0.push_stmt(self.mcx.expr_stmt(assign));
         val
     }
 
@@ -504,7 +537,37 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
-        ptr
+        let mut expr = self.mcx.value(ptr);
+        let mut projected_ty = ty;
+
+        for (i, index) in indices.iter().enumerate() {
+            let index = self.require_const_usize(*index, "gep");
+
+            if i == 0 && index == 0 {
+                continue;
+            }
+
+            projected_ty = match projected_ty {
+                CTy::Ref(kind) => match kind.0 {
+                    CTyKind::Array(elem, _) => {
+                        expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                        *elem
+                    }
+                    CTyKind::Pointer(_) => panic!("gep on pointer values is not supported yet"),
+                },
+                _ => {
+                    expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                    projected_ty
+                }
+            };
+        }
+
+        let ret = self.bb.0.next_local_var();
+        let ret_ty = self.pointer_to(projected_ty);
+        let addr = self.mcx.unary("&", expr);
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(addr))));
+        self.record_value_ty(ret, ret_ty);
+        ret
     }
 
     fn inbounds_gep(
@@ -513,7 +576,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         indices: &[Self::Value],
     ) -> Self::Value {
-        ptr
+        self.gep(ty, ptr, indices)
     }
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
