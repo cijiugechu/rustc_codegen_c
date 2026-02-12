@@ -19,6 +19,14 @@ pub enum CStmtKind<'mx> {
     Decl(CDecl<'mx>),
     /// Expression statement, e.g. `foo(x + 1);`.
     Expr(CExpr<'mx>),
+    /// Label statement, e.g. `bb0:`.
+    Label(&'mx str),
+    /// Goto statement, e.g. `goto bb1;`.
+    Goto(&'mx str),
+    /// Conditional goto statement.
+    IfGoto { cond: CExpr<'mx>, then_label: &'mx str, else_label: &'mx str },
+    /// Switch statement with goto targets.
+    Switch { expr: CExpr<'mx>, cases: Vec<(u128, &'mx str)>, default: &'mx str },
 }
 
 impl<'mx> ModuleCtx<'mx> {
@@ -46,6 +54,36 @@ impl<'mx> ModuleCtx<'mx> {
     pub fn expr_stmt(self, expr: CExpr<'mx>) -> CStmt<'mx> {
         self.stmt(CStmtKind::Expr(expr))
     }
+
+    /// Create a label statement.
+    pub fn label_stmt(self, label: &'mx str) -> CStmt<'mx> {
+        self.stmt(CStmtKind::Label(label))
+    }
+
+    /// Create a goto statement.
+    pub fn goto_stmt(self, label: &'mx str) -> CStmt<'mx> {
+        self.stmt(CStmtKind::Goto(label))
+    }
+
+    /// Create a conditional goto statement.
+    pub fn if_goto_stmt(
+        self,
+        cond: CExpr<'mx>,
+        then_label: &'mx str,
+        else_label: &'mx str,
+    ) -> CStmt<'mx> {
+        self.stmt(CStmtKind::IfGoto { cond, then_label, else_label })
+    }
+
+    /// Create a switch statement.
+    pub fn switch_stmt(
+        self,
+        expr: CExpr<'mx>,
+        cases: Vec<(u128, &'mx str)>,
+        default: &'mx str,
+    ) -> CStmt<'mx> {
+        self.stmt(CStmtKind::Switch { expr, cases, default })
+    }
 }
 
 impl Print for CStmt<'_> {
@@ -66,6 +104,79 @@ impl Print for CStmt<'_> {
             CStmtKind::Expr(expr) => {
                 expr.print_to(ctx);
                 ctx.word(";");
+            }
+            CStmtKind::Label(label) => {
+                ctx.word(label.to_string());
+                ctx.word(":");
+            }
+            CStmtKind::Goto(label) => {
+                ctx.word("goto");
+                ctx.nbsp();
+                ctx.word(label.to_string());
+                ctx.word(";");
+            }
+            CStmtKind::IfGoto { cond, then_label, else_label } => {
+                ctx.ibox(INDENT, |ctx| {
+                    ctx.word("if");
+                    ctx.nbsp();
+                    ctx.word("(");
+                    cond.print_to(ctx);
+                    ctx.word(")");
+                    ctx.nbsp();
+                    ctx.word("goto");
+                    ctx.nbsp();
+                    ctx.word(then_label.to_string());
+                    ctx.word(";");
+                    ctx.nbsp();
+                    ctx.word("else");
+                    ctx.nbsp();
+                    ctx.word("goto");
+                    ctx.nbsp();
+                    ctx.word(else_label.to_string());
+                    ctx.word(";");
+                });
+            }
+            CStmtKind::Switch { expr, cases, default } => {
+                ctx.ibox(INDENT, |ctx| {
+                    ctx.word("switch");
+                    ctx.nbsp();
+                    ctx.word("(");
+                    expr.print_to(ctx);
+                    ctx.word(")");
+                    ctx.nbsp();
+                    ctx.cbox_delim(INDENT, ("{", "}"), 1, |ctx| {
+                        if let Some((first, rest)) = cases.split_first() {
+                            ctx.ibox(INDENT, |ctx| {
+                                ctx.word(format!("case {}:", first.0));
+                                ctx.nbsp();
+                                ctx.word("goto");
+                                ctx.nbsp();
+                                ctx.word(first.1.to_string());
+                                ctx.word(";");
+                            });
+                            for (val, label) in rest {
+                                ctx.hardbreak();
+                                ctx.ibox(INDENT, |ctx| {
+                                    ctx.word(format!("case {val}:"));
+                                    ctx.nbsp();
+                                    ctx.word("goto");
+                                    ctx.nbsp();
+                                    ctx.word(label.to_string());
+                                    ctx.word(";");
+                                });
+                            }
+                            ctx.hardbreak();
+                        }
+                        ctx.ibox(INDENT, |ctx| {
+                            ctx.word("default:");
+                            ctx.nbsp();
+                            ctx.word("goto");
+                            ctx.nbsp();
+                            ctx.word(default.to_string());
+                            ctx.word(";");
+                        });
+                    });
+                });
             }
         }
     }

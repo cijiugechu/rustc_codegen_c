@@ -16,13 +16,24 @@
 #define __rust_utos(u, s, v, m) \
     ((v) <= (m) ? ((s)v) : ((s)((u)(v) - (u)(m) - 1)))
 
+static inline _Noreturn void __rust_panic_bounds_check(size_t index, size_t len) {
+    (void)index;
+    (void)len;
+    abort();
+}
+
 int64_t foo(uint8_t _0, uint16_t _1, uint32_t _2);
 int32_t main();
 
 int64_t foo(uint8_t _0, uint16_t _1, uint32_t _2)
 {
+  bb0_start:
   int64_t _3 = __rust_utos(uint64_t, int64_t, (int64_t) _0, INT64_MAX);
   return _3;
 }
 
-int32_t main() { return 0; }
+int32_t main()
+{
+  bb0_start:
+  return 0;
+}

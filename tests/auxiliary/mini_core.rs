@@ -133,6 +133,23 @@ impl<T, const N: usize> IndexMut<usize> for [T; N] {
     }
 }
 
+#[lang = "panic_bounds_check"]
+#[track_caller]
+fn panic_bounds_check(index: usize, len: usize) -> ! {
+    unsafe { __rust_panic_bounds_check(index, len) }
+}
+
+#[lang = "panic_location"]
+struct PanicLocation {
+    file: &'static str,
+    line: u32,
+    column: u32,
+}
+
+unsafe extern "C" {
+    fn __rust_panic_bounds_check(index: usize, len: usize) -> !;
+}
+
 pub mod libc {
     #[link(name = "c")]
     unsafe extern "C" {

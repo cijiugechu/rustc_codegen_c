@@ -4,7 +4,6 @@ use std::ops::Deref;
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::func::CFunc;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, ConstCodegenMethods};
 use rustc_data_structures::intern::Interned;
@@ -18,7 +17,7 @@ use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 
-use crate::context::CodegenCx;
+use crate::context::{CBasicBlock, CodegenCx};
 
 mod abi;
 mod asm;
@@ -33,7 +32,7 @@ mod r#static;
 pub struct Builder<'a, 'tcx, 'mx> {
     /// The associated codegen context.
     pub cx: &'a CodegenCx<'tcx, 'mx>,
-    bb: CFunc<'mx>,
+    bb: CBasicBlock<'mx>,
     value_tys: FxHashMap<CValue<'mx>, CTy<'mx>>,
 }
 
@@ -123,7 +122,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             (Some(lhs), Some(rhs)) => panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}"),
             (Some(lhs), None) => lhs,
             (None, Some(rhs)) => rhs,
-            (None, None) => panic!("cannot infer operand type for {op}"),
+            (None, None) => CTy::UInt(CUintTy::Usize),
         };
 
         match ty {
@@ -158,9 +157,10 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     type CodegenCx = CodegenCx<'tcx, 'mx>;
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
         let mut value_tys = FxHashMap::default();
-        for (ty, value) in llbb.0.params.iter() {
+        for (ty, value) in llbb.func.0.params.iter() {
             value_tys.insert(*value, *ty);
         }
+        llbb.func.0.emit_label_once(cx.mcx, llbb.label);
         Self { cx, bb: llbb, value_tys }
     }
 
@@ -169,35 +169,38 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn llbb(&self) -> Self::BasicBlock {
-        todo!()
+        self.bb
     }
 
     fn set_span(&mut self, _span: rustc_span::Span) {}
 
     fn append_block(cx: &'a Self::CodegenCx, llfn: Self::Function, name: &str) -> Self::BasicBlock {
-        // assume there is only one basic block
-        // more complicated cases will be handled in the future
-        llfn
+        let id = llfn.0.next_block_id();
+        let label = cx.mcx.alloc_str(&format!("bb{}_{}", id, name));
+        CBasicBlock { func: llfn, label }
     }
 
     fn append_sibling_block(&mut self, name: &str) -> Self::BasicBlock {
-        todo!()
+        let id = self.bb.func.0.next_block_id();
+        let label = self.mcx.alloc_str(&format!("bb{}_{}", id, name));
+        CBasicBlock { func: self.bb.func, label }
     }
 
     fn switch_to_block(&mut self, llbb: Self::BasicBlock) {
-        todo!()
+        self.bb = llbb;
+        self.bb.func.0.emit_label_once(self.mcx, llbb.label);
     }
 
     fn ret_void(&mut self) {
-        self.bb.0.push_stmt(self.cx.mcx.ret(None));
+        self.bb.func.0.push_stmt(self.cx.mcx.ret(None));
     }
 
     fn ret(&mut self, v: Self::Value) {
-        self.bb.0.push_stmt(self.cx.mcx.ret(Some(self.cx.mcx.value(v))))
+        self.bb.func.0.push_stmt(self.cx.mcx.ret(Some(self.cx.mcx.value(v))))
     }
 
     fn br(&mut self, dest: Self::BasicBlock) {
-        todo!()
+        self.bb.func.0.push_stmt(self.mcx.goto_stmt(dest.label));
     }
 
     fn cond_br(
@@ -206,7 +209,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         then_llbb: Self::BasicBlock,
         else_llbb: Self::BasicBlock,
     ) {
-        todo!()
+        let cond = self.mcx.value(cond);
+        self.bb.func.0.push_stmt(self.mcx.if_goto_stmt(cond, then_llbb.label, else_llbb.label));
     }
 
     fn switch(
@@ -215,7 +219,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         else_llbb: Self::BasicBlock,
         cases: impl ExactSizeIterator<Item = (u128, Self::BasicBlock)>,
     ) {
-        todo!()
+        let cases = cases.map(|(val, bb)| (val, bb.label)).collect();
+        self.bb.func.0.push_stmt(self.mcx.switch_stmt(self.mcx.value(v), cases, else_llbb.label));
     }
 
     fn invoke(
@@ -234,14 +239,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn unreachable(&mut self) {
-        todo!()
+        let abort = self.mcx.call(self.mcx.value(CValue::Func("abort")), vec![]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(abort));
     }
 
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "add");
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "+");
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -260,9 +266,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "sub");
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "-");
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -281,9 +287,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "mul");
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "*");
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -305,9 +311,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         if !matches!(ty, CTy::UInt(_)) {
             panic!("unsupported type for udiv: {ty:?}");
         }
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -321,9 +327,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         if !matches!(ty, CTy::Int(_)) {
             panic!("unsupported type for sdiv: {ty:?}");
         }
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -443,12 +449,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn alloca(&mut self, size: rustc_abi::Size, align: rustc_abi::Align) -> Self::Value {
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let bytes = size.bytes_usize();
         let ty = CTy::Ref(Interned::new_unchecked(
             self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes)),
         ));
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, None)));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, None)));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -457,8 +463,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));
         let expr = self.mcx.unary("*", cast_ptr);
 
-        let ret = self.bb.0.next_local_var();
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
     }
@@ -534,7 +540,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
         let lhs = self.mcx.unary("*", cast_ptr);
         let assign = self.mcx.binary(lhs, self.mcx.value(val), "=");
-        self.bb.0.push_stmt(self.mcx.expr_stmt(assign));
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(assign));
         val
     }
 
@@ -614,10 +620,10 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             return ptr;
         }
 
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
         let ret_ty = self.pointer_to(projected_ty);
         let addr = self.mcx.unary("&", expr);
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(addr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(addr))));
         self.record_value_ty(ret, ret_ty);
         ret
     }
@@ -698,7 +704,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     /// result to a signed integer.
     fn intcast(&mut self, val: Self::Value, dest_ty: Self::Type, is_signed: bool) -> Self::Value {
         let mcx = self.cx.mcx;
-        let ret = self.bb.0.next_local_var();
+        let ret = self.bb.func.0.next_local_var();
 
         let mut cast = mcx.cast(dest_ty, mcx.value(val));
         if dest_ty.is_signed() {
@@ -712,7 +718,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 ],
             );
         }
-        self.bb.0.push_stmt(mcx.decl_stmt(mcx.var(ret, dest_ty, Some(cast))));
+        self.bb.func.0.push_stmt(mcx.decl_stmt(mcx.var(ret, dest_ty, Some(cast))));
         self.record_value_ty(ret, dest_ty);
         ret
     }
@@ -727,7 +733,22 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> Self::Value {
-        todo!()
+        use rustc_codegen_ssa::common::IntPredicate;
+
+        let op = match op {
+            IntPredicate::IntEQ => "==",
+            IntPredicate::IntNE => "!=",
+            IntPredicate::IntUGT | IntPredicate::IntSGT => ">",
+            IntPredicate::IntUGE | IntPredicate::IntSGE => ">=",
+            IntPredicate::IntULT | IntPredicate::IntSLT => "<",
+            IntPredicate::IntULE | IntPredicate::IntSLE => "<=",
+        };
+
+        let ret = self.bb.func.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), op);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, CTy::Bool, Some(expr))));
+        self.record_value_ty(ret, CTy::Bool);
+        ret
     }
 
     fn fcmp(
@@ -898,15 +919,27 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let fn_abi = fn_abi.unwrap();
         let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
 
-        let args = args.iter().map(|v| self.mcx.value(*v)).collect();
+        let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
+        let mut callee = llfn;
+        if let CValue::Func(name) = llfn {
+            if name.contains("panic_bounds_check") {
+                callee = CValue::Func("__rust_panic_bounds_check");
+                if args.len() > 2 {
+                    args.truncate(2);
+                }
+            }
+        }
 
-        let call = self.mcx.call(self.mcx.value(llfn), args);
-        let ret = self.bb.0.next_local_var();
-
-        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
-        self.record_value_ty(ret, ret_ty);
-
-        ret
+        let call = self.mcx.call(self.mcx.value(callee), args);
+        if ret_ty == CTy::Void {
+            self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+            CValue::Scalar(0)
+        } else {
+            let ret = self.bb.func.0.next_local_var();
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
+            self.record_value_ty(ret, ret_ty);
+            ret
+        }
     }
 
     fn tail_call(

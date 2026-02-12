@@ -58,6 +58,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
         match layout.ty.kind() {
+            TyKind::Bool => CTy::Bool,
             TyKind::Int(_) | TyKind::Uint(_) => self.immediate_backend_type(layout),
             TyKind::Array(elem_ty, _) => {
                 let elem_layout = self.layout_of(*elem_ty);
@@ -88,6 +89,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
 
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
         match layout.ty.kind() {
+            TyKind::Bool => CTy::Bool,
             TyKind::Int(int) => self.mcx.get_int_type(*int),
             TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
             TyKind::Never => CTy::Void,

@@ -103,12 +103,17 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     ) -> Self::Value {
         match cv {
             Scalar::Int(scalar) => CValue::Scalar(scalar.to_int(scalar.size())),
-            Scalar::Ptr(_, _) => todo!(),
+            // This backend does not materialize real constant addresses yet.
+            // For panic location and similar metadata paths, a null pointer is sufficient.
+            Scalar::Ptr(_, _) => CValue::Scalar(0),
         }
     }
 
     fn const_ptr_byte_offset(&self, val: Self::Value, offset: rustc_abi::Size) -> Self::Value {
-        todo!()
+        match val {
+            CValue::Scalar(v) => CValue::Scalar(v + offset.bytes() as i128),
+            _ => val,
+        }
     }
     fn const_vector(&self, _: &[Self::Value]) -> Self::Value {
         todo!()

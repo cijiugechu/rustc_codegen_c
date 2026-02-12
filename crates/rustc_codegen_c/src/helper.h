@@ -10,3 +10,9 @@
   */
 #define __rust_utos(u, s, v, m) \
     ((v) <= (m) ? ((s)v) : ((s)((u)(v) - (u)(m) - 1)))
+
+static inline _Noreturn void __rust_panic_bounds_check(size_t index, size_t len) {
+    (void)index;
+    (void)len;
+    abort();
+}

@@ -13,6 +13,8 @@ extern crate mini_core;
 // CHECK-LABEL: main
 // CHECK: [1]
 // CHECK: [2]
+// CHECK: if (
+// CHECK: __rust_panic_bounds_check
 // CHECK: return
 #[no_mangle]
 pub fn main() -> i32 {

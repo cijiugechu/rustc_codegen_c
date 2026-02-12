@@ -1,6 +1,7 @@
 //! This module defines AST nodes for C functions.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use rustc_data_structures::intern::Interned;
 
@@ -26,6 +27,10 @@ pub struct CFuncKind<'mx> {
     pub body: RefCell<Vec<CStmt<'mx>>>,
     /// A counter for local variables, for generating unique names.
     local_var_counter: Cell<usize>,
+    /// A counter for basic block labels.
+    block_counter: Cell<usize>,
+    /// Labels already emitted in the function body.
+    emitted_labels: RefCell<HashSet<&'mx str>>,
 }
 
 impl<'mx> CFuncKind<'mx> {
@@ -37,8 +42,18 @@ impl<'mx> CFuncKind<'mx> {
             .map(|(i, ty)| (ty, CValue::Local(i)))
             .collect::<Vec<_>>();
         let local_var_counter = Cell::new(params.len());
+        let block_counter = Cell::new(0);
+        let emitted_labels = RefCell::new(HashSet::new());
 
-        Self { name, ty, params, body: RefCell::new(Vec::new()), local_var_counter }
+        Self {
+            name,
+            ty,
+            params,
+            body: RefCell::new(Vec::new()),
+            local_var_counter,
+            block_counter,
+            emitted_labels,
+        }
     }
 
     /// Push a statement to the end of the function body.
@@ -51,6 +66,20 @@ impl<'mx> CFuncKind<'mx> {
         let val = CValue::Local(self.local_var_counter.get());
         self.local_var_counter.set(self.local_var_counter.get() + 1);
         val
+    }
+
+    /// Get a new unique basic block id.
+    pub fn next_block_id(&self) -> usize {
+        let id = self.block_counter.get();
+        self.block_counter.set(id + 1);
+        id
+    }
+
+    /// Emit a block label once.
+    pub fn emit_label_once(&self, mcx: ModuleCtx<'mx>, label: &'mx str) {
+        if self.emitted_labels.borrow_mut().insert(label) {
+            self.push_stmt(mcx.label_stmt(label));
+        }
     }
 }
 

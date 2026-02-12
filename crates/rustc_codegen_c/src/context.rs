@@ -3,6 +3,7 @@
 use rustc_middle::ty;
 use rustc_middle::ty::layout::HasTypingEnv;
 use std::cell::RefCell;
+use std::hash::{Hash, Hasher};
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
@@ -29,6 +30,27 @@ mod misc;
 mod pre_define;
 mod r#static;
 mod type_membership;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CBasicBlock<'mx> {
+    pub func: CFunc<'mx>,
+    pub label: &'mx str,
+}
+
+impl PartialEq for CBasicBlock<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.func.0, other.func.0) && self.label == other.label
+    }
+}
+
+impl Eq for CBasicBlock<'_> {}
+
+impl Hash for CBasicBlock<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (self.func.0 as *const _ as usize).hash(state);
+        self.label.hash(state);
+    }
+}
 
 /// Codegen context.
 ///
@@ -97,7 +119,7 @@ impl<'tcx, 'mx> BackendTypes for CodegenCx<'tcx, 'mx> {
     type Value = CValue<'mx>;
     type Metadata = CValue<'mx>;
     type Function = CFunc<'mx>;
-    type BasicBlock = CFunc<'mx>;
+    type BasicBlock = CBasicBlock<'mx>;
     type Type = CTy<'mx>;
     type Funclet = ();
     type DIScope = ();
