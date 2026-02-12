@@ -11,6 +11,30 @@ use rustc_type_ir::TyKind;
 use crate::context::{AdtFieldLayout, AdtLayoutInfo, CodegenCx};
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
+    fn is_fieldless_enum(&self, adt_def: rustc_middle::ty::AdtDef<'tcx>) -> bool {
+        adt_def.is_enum() && adt_def.variants().iter().all(|variant| variant.fields.is_empty())
+    }
+
+    fn scalar_backend_type(&self, scalar: rustc_abi::Scalar) -> CTy<'mx> {
+        match scalar.primitive() {
+            Primitive::Int(int, signed) => match (int, signed) {
+                (Integer::I8, true) => CTy::Int(CIntTy::I8),
+                (Integer::I16, true) => CTy::Int(CIntTy::I16),
+                (Integer::I32, true) => CTy::Int(CIntTy::I32),
+                (Integer::I64, true) => CTy::Int(CIntTy::I64),
+                (Integer::I8, false) => CTy::UInt(CUintTy::U8),
+                (Integer::I16, false) => CTy::UInt(CUintTy::U16),
+                (Integer::I32, false) => CTy::UInt(CUintTy::U32),
+                (Integer::I64, false) => CTy::UInt(CUintTy::U64),
+                (Integer::I128, _) => todo!("i128 scalar backend type is not supported yet"),
+            },
+            Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+            )),
+            Primitive::Float(_) => todo!("float scalar backend type is not supported yet"),
+        }
+    }
+
     pub(crate) fn define_simple_struct_layout(
         &self,
         layout: TyAndLayout<'tcx>,
@@ -82,7 +106,8 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             panic!("expected tuple type, got {:?}", layout.ty.kind());
         };
 
-        let name = self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.struct_layouts.borrow().len()));
+        let name =
+            self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.struct_layouts.borrow().len()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
 
         let mut fields = Vec::with_capacity(fields_tys.len());
@@ -127,7 +152,15 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 let array = self.mcx.arena().alloc(CTyKind::Array(elem, layout.fields.count()));
                 CTy::Ref(Interned::new_unchecked(array))
             }
-            TyKind::Adt(adt_def, args) => self.define_simple_struct_layout(layout, *adt_def, args),
+            TyKind::Adt(adt_def, args) => {
+                if self.is_fieldless_enum(*adt_def) {
+                    self.immediate_backend_type(layout)
+                } else if adt_def.is_enum() {
+                    todo!("data-carrying enums are not supported yet: {:?}", layout.ty)
+                } else {
+                    self.define_simple_struct_layout(layout, *adt_def, args)
+                }
+            }
             TyKind::Tuple(..) => self.define_tuple_layout(layout),
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
@@ -150,6 +183,13 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
+        if let BackendRepr::Scalar(scalar) = layout.backend_repr {
+            if matches!(layout.ty.kind(), TyKind::Bool) {
+                return CTy::Bool;
+            }
+            return self.scalar_backend_type(scalar);
+        }
+
         if let BackendRepr::ScalarPair(_, _) = layout.backend_repr {
             return self.abi_tuple_ty(&[
                 self.scalar_pair_element_backend_type(layout, 0, true),

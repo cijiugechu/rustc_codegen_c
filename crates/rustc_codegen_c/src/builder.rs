@@ -950,11 +950,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        self.intcast(val, dest_ty, false)
     }
 
     fn sext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        self.intcast(val, dest_ty, true)
     }
 
     fn fptoui_sat(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
@@ -1346,7 +1346,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn zext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        self.intcast(val, dest_ty, false)
     }
 
     fn apply_attrs_to_cleanup_callsite(&mut self, llret: Self::Value) {
