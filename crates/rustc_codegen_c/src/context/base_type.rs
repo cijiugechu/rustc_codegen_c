@@ -128,6 +128,10 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             }
         }
 
+        if let rustc_codegen_c_ast::expr::CValue::Func(_) = v {
+            return self.type_ptr();
+        }
+
         panic!("val_ty is not known for value {v:?}")
     }
 }

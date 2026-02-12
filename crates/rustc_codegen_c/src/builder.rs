@@ -212,7 +212,13 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 }
             }
             Some(other) => self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
-                panic!("unsupported alloca declaration type suggestion: {other:?}")
+                // When the suggested element type doesn't tile the stack slot, fall back to a
+                // byte array and rely on typed loads/stores through explicit casts.
+                CTy::Ref(Interned::new_unchecked(
+                    self.mcx
+                        .arena()
+                        .alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), slot.bytes.max(1))),
+                ))
             }),
             None => panic!("cannot infer alloca declaration type for {ptr:?}"),
         };
@@ -258,6 +264,11 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CUintTy::U64 => 8,
                 CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
             }),
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(_) => Some(self.tcx.data_layout.pointer_size().bytes() as usize),
+                CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
+                CTyKind::Struct(_) => self.struct_layout_info(ty).map(|info| info.size),
+            },
             _ => None,
         }
     }
@@ -1021,15 +1032,54 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn ptrtoint(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn inttoptr(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn bitcast(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let src_ty = self.value_ty(val).unwrap_or(dest_ty);
+        let src_bytes = self
+            .c_ty_size_bytes(src_ty)
+            .unwrap_or_else(|| panic!("bitcast source size is not known: {src_ty:?}"));
+        let dest_bytes = self
+            .c_ty_size_bytes(dest_ty)
+            .unwrap_or_else(|| panic!("bitcast destination size is not known: {dest_ty:?}"));
+        assert_eq!(src_bytes, dest_bytes, "bitcast size mismatch: {src_ty:?} -> {dest_ty:?}");
+
+        let src = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            src,
+            src_ty,
+            Some(self.mcx.value(val)),
+        )));
+        self.record_value_ty(src, src_ty);
+
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, None)));
+        self.record_value_ty(ret, dest_ty);
+
+        let void_ptr = self.pointer_to(CTy::Void);
+        let dst_ptr = self.mcx.cast(void_ptr, self.mcx.unary("&", self.mcx.value(ret)));
+        let src_ptr = self.mcx.cast(void_ptr, self.mcx.unary("&", self.mcx.value(src)));
+        let size_arg = self
+            .mcx
+            .cast(CTy::UInt(CUintTy::Usize), self.mcx.value(CValue::Scalar(dest_bytes as i128)));
+        let copy =
+            self.mcx.call(self.mcx.raw("__builtin_memcpy"), vec![dst_ptr, src_ptr, size_arg]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(copy));
+
+        ret
     }
 
     /// Performs cast between integers, x as ty in Rust.
