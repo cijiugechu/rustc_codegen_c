@@ -88,6 +88,8 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
+    /// Cached exception personality function symbol.
+    pub eh_personality_fn: RefCell<Option<CFunc<'mx>>>,
     /// Mapping from Rust static definitions to their generated C symbols.
     pub static_symbols: RefCell<FxHashMap<DefId, &'mx str>>,
     /// Monotonic counter for assigning unique identities to typed scalar constants.
@@ -130,6 +132,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             tcx,
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
+            eh_personality_fn: RefCell::new(None),
             static_symbols: RefCell::new(FxHashMap::default()),
             scalar_ids: Cell::new(0),
             value_tys: RefCell::new(FxHashMap::default()),

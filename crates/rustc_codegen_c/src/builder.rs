@@ -132,17 +132,124 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.cx.packed_scalar_pairs.borrow_mut().insert((self.fkey(), pair), (a, b));
     }
 
+    fn integer_shape(&self, ty: CTy<'mx>) -> Option<(bool, u64, bool)> {
+        match ty {
+            CTy::Int(int) => {
+                let bits = match int {
+                    CIntTy::Isize => self.tcx.data_layout.pointer_size().bits(),
+                    CIntTy::I8 => 8,
+                    CIntTy::I16 => 16,
+                    CIntTy::I32 => 32,
+                    CIntTy::I64 => 64,
+                };
+                Some((true, bits, matches!(int, CIntTy::Isize)))
+            }
+            CTy::UInt(uint) => {
+                let bits = match uint {
+                    CUintTy::Usize => self.tcx.data_layout.pointer_size().bits(),
+                    CUintTy::U8 => 8,
+                    CUintTy::U16 => 16,
+                    CUintTy::U32 => 32,
+                    CUintTy::U64 => 64,
+                };
+                Some((false, bits, matches!(uint, CUintTy::Usize)))
+            }
+            _ => None,
+        }
+    }
+
+    fn compatible_integer_result_ty(&self, lhs: CTy<'mx>, rhs: CTy<'mx>) -> Option<CTy<'mx>> {
+        if lhs == rhs {
+            return Some(lhs);
+        }
+
+        let (lhs_signed, lhs_bits, lhs_is_size) = self.integer_shape(lhs)?;
+        let (rhs_signed, rhs_bits, rhs_is_size) = self.integer_shape(rhs)?;
+        if lhs_signed != rhs_signed || lhs_bits != rhs_bits {
+            return None;
+        }
+
+        if lhs_is_size && !rhs_is_size {
+            Some(lhs)
+        } else if rhs_is_size && !lhs_is_size {
+            Some(rhs)
+        } else {
+            Some(lhs)
+        }
+    }
+
+    fn compatible_bitwise_result_ty(&self, lhs: CTy<'mx>, rhs: CTy<'mx>) -> Option<CTy<'mx>> {
+        if lhs == rhs {
+            return Some(lhs);
+        }
+
+        match (lhs, rhs) {
+            (CTy::Bool, CTy::Bool) => Some(CTy::Bool),
+            (CTy::Int(_) | CTy::UInt(_), CTy::Int(_) | CTy::UInt(_)) => {
+                let (_, lhs_bits, lhs_is_size) = self.integer_shape(lhs)?;
+                let (_, rhs_bits, rhs_is_size) = self.integer_shape(rhs)?;
+                if lhs_bits != rhs_bits {
+                    return None;
+                }
+
+                if lhs_is_size && !rhs_is_size {
+                    return Some(lhs);
+                }
+                if rhs_is_size && !lhs_is_size {
+                    return Some(rhs);
+                }
+
+                match (lhs, rhs) {
+                    (CTy::UInt(_), CTy::Int(_)) => Some(lhs),
+                    (CTy::Int(_), CTy::UInt(_)) => Some(rhs),
+                    _ => Some(lhs),
+                }
+            }
+            _ => None,
+        }
+    }
+
     fn infer_integer_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
         let ty = match (self.value_ty(lhs), self.value_ty(rhs)) {
             (Some(lhs), Some(rhs)) if lhs == rhs => lhs,
-            (Some(lhs), Some(rhs)) => panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}"),
+            (Some(lhs), Some(rhs)) => self
+                .compatible_integer_result_ty(lhs, rhs)
+                .unwrap_or_else(|| panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}")),
             (Some(lhs), None) => lhs,
             (None, Some(rhs)) => rhs,
             (None, None) => panic!("cannot infer operand type for {op}"),
         };
 
         match ty {
-            CTy::Int(_) | CTy::UInt(_) => ty,
+            CTy::Bool | CTy::Int(_) | CTy::UInt(_) => ty,
+            _ => panic!("unsupported type for {op}: {ty:?}"),
+        }
+    }
+
+    fn coerce_int_operand_expr(
+        &self,
+        value: CValue<'mx>,
+        target_ty: CTy<'mx>,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        match self.value_ty(value) {
+            Some(ty) if ty != target_ty => self.mcx.cast(target_ty, self.mcx.value(value)),
+            _ => self.mcx.value(value),
+        }
+    }
+
+    fn infer_bitwise_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
+        let ty = match (self.value_ty(lhs), self.value_ty(rhs)) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => lhs,
+            (Some(lhs), Some(rhs)) => self
+                .compatible_bitwise_result_ty(lhs, rhs)
+                .unwrap_or_else(|| panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}")),
+            (Some(lhs), None) => lhs,
+            (None, Some(rhs)) => rhs,
+            (None, None) => panic!("cannot infer operand type for {op}"),
+        };
+
+        match ty {
+            CTy::Bool | CTy::Int(_) | CTy::UInt(_) => ty,
             _ => panic!("unsupported type for {op}: {ty:?}"),
         }
     }
@@ -481,7 +588,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "add");
         let ret = self.bb.func.0.next_local_var();
-        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "+");
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "+");
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
@@ -502,7 +611,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "sub");
         let ret = self.bb.func.0.next_local_var();
-        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "-");
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "-");
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
@@ -523,7 +634,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
         let ty = self.infer_integer_binop_ty(lhs, rhs, "mul");
         let ret = self.bb.func.0.next_local_var();
-        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "*");
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "*");
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
@@ -547,7 +660,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             panic!("unsupported type for udiv: {ty:?}");
         }
         let ret = self.bb.func.0.next_local_var();
-        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "/");
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
@@ -563,7 +678,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             panic!("unsupported type for sdiv: {ty:?}");
         }
         let ret = self.bb.func.0.next_local_var();
-        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "/");
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
         self.record_value_ty(ret, ty);
         ret
@@ -642,15 +759,36 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn and(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "and");
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "&");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn or(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "or");
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "|");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn xor(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "xor");
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "^");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn neg(&mut self, v: Self::Value) -> Self::Value {
@@ -662,7 +800,21 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn not(&mut self, v: Self::Value) -> Self::Value {
-        todo!()
+        let ty = match self.value_ty(v) {
+            Some(ty @ (CTy::Bool | CTy::Int(_) | CTy::UInt(_))) => ty,
+            Some(other) => panic!("unsupported type for not: {other:?}"),
+            None => panic!("cannot infer operand type for not"),
+        };
+        let ret = self.bb.func.0.next_local_var();
+        let operand = self.coerce_int_operand_expr(v, ty);
+        let expr = if matches!(ty, CTy::Bool) {
+            self.mcx.unary("!", operand)
+        } else {
+            self.mcx.unary("~", operand)
+        };
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn checked_binop(
@@ -1309,7 +1461,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn set_personality_fn(&mut self, personality: Self::Function) {
-        todo!()
+        let _ = personality;
     }
 
     fn cleanup_landing_pad(&mut self, pers_fn: Self::Function) -> (Self::Value, Self::Value) {

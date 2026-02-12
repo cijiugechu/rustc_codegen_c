@@ -1,9 +1,14 @@
 use std::cell::RefCell;
 
 use rustc_codegen_c_ast::expr::CValue;
+use rustc_codegen_c_ast::func::CFuncKind;
+use rustc_codegen_c_ast::ty::{CIntTy, CTy};
 use rustc_codegen_ssa::traits::MiscCodegenMethods;
+use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
+use rustc_middle::ty::layout::HasTypingEnv;
 use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
+use rustc_span::DUMMY_SP;
 
 use crate::context::CodegenCx;
 
@@ -59,7 +64,42 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn eh_personality(&self) -> Self::Function {
-        todo!()
+        if let Some(func) = *self.eh_personality_fn.borrow() {
+            return func;
+        }
+
+        let func = if let Some(def_id) = self.tcx.lang_items().eh_personality() {
+            let instance = Instance::expect_resolve(
+                self.tcx,
+                self.typing_env(),
+                def_id,
+                rustc_middle::ty::List::empty(),
+                DUMMY_SP,
+            );
+            if let Some(func) = self.function_instances.borrow().get(&instance).copied() {
+                func
+            } else {
+                let symbol_name = sanitize_symbol_name(self.tcx.symbol_name(instance).name);
+                let func = CFuncKind::new(
+                    self.mcx.alloc_str(&symbol_name),
+                    CTy::Int(CIntTy::I32),
+                    [],
+                );
+                let func = Interned::new_unchecked(self.mcx.func(func));
+                self.mcx.module().push_func(func);
+                self.function_instances.borrow_mut().insert(instance, func);
+                func
+            }
+        } else {
+            let func =
+                CFuncKind::new(self.mcx.alloc_str("rust_eh_personality"), CTy::Int(CIntTy::I32), []);
+            let func = Interned::new_unchecked(self.mcx.func(func));
+            self.mcx.module().push_func(func);
+            func
+        };
+
+        *self.eh_personality_fn.borrow_mut() = Some(func);
+        func
     }
 
     fn sess(&self) -> &rustc_session::Session {
