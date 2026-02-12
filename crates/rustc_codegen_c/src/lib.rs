@@ -27,11 +27,12 @@ use rustc_codegen_ssa::back::write::{
     CodegenContext, FatLtoInput, ModuleConfig, OngoingCodegen, TargetMachineFactoryFn,
 };
 use rustc_codegen_ssa::base::codegen_crate;
+use rustc_codegen_ssa::target_features::cfg_target_feature;
 pub use rustc_codegen_ssa::traits::CodegenBackend;
 use rustc_codegen_ssa::traits::{
     ExtraBackendMethods, ModuleBufferMethods, ThinBufferMethods, WriteBackendMethods,
 };
-use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen};
+use rustc_codegen_ssa::{CodegenResults, CompiledModule, ModuleCodegen, TargetConfig};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::DiagCtxtHandle;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
@@ -57,7 +58,51 @@ impl CodegenBackend for CCodegen {
     }
 
     fn provide(&self, providers: &mut Providers) {
-        providers.global_backend_features = |_tcx, ()| vec![]
+        providers.global_backend_features = |tcx, ()| {
+            let mut features: Vec<String> = tcx
+                .sess
+                .target
+                .features
+                .split(',')
+                .filter(|feature| !feature.is_empty())
+                .map(str::to_owned)
+                .collect();
+
+            features.extend(
+                tcx.sess
+                    .opts
+                    .cg
+                    .target_feature
+                    .split(',')
+                    .filter(|feature| !feature.is_empty())
+                    .map(str::to_owned),
+            );
+
+            features
+        }
+    }
+
+    fn target_config(&self, sess: &Session) -> TargetConfig {
+        let (unstable_target_features, target_features) = cfg_target_feature(sess, |feature| {
+            if sess.target.arch == "x86_64" && (feature == "x87" || feature == "sse2") {
+                return true;
+            }
+
+            sess.target.features.split(',').any(|target_feature| {
+                target_feature
+                    .strip_prefix('+')
+                    .is_some_and(|target_feature| target_feature == feature)
+            })
+        });
+
+        TargetConfig {
+            target_features,
+            unstable_target_features,
+            has_reliable_f16: true,
+            has_reliable_f16_math: true,
+            has_reliable_f128: true,
+            has_reliable_f128_math: true,
+        }
     }
 
     fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn std::any::Any> {
