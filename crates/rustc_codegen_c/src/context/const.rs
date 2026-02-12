@@ -6,63 +6,63 @@ use crate::context::CodegenCx;
 
 impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
-        todo!()
+        CValue::Scalar(0)
     }
 
     fn const_undef(&self, t: Self::Type) -> Self::Value {
-        todo!()
+        CValue::Scalar(0)
     }
 
     fn const_poison(&self, t: Self::Type) -> Self::Value {
-        todo!()
+        CValue::Scalar(0)
     }
 
     fn const_int(&self, t: Self::Type, i: i64) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_uint(&self, t: Self::Type, i: u64) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_uint_big(&self, t: Self::Type, u: u128) -> Self::Value {
-        todo!()
+        CValue::Scalar(u as i128)
     }
 
     fn const_bool(&self, val: bool) -> Self::Value {
-        todo!()
+        CValue::Scalar(if val { 1 } else { 0 })
     }
 
     fn const_i16(&self, i: i16) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_i32(&self, i: i32) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_i8(&self, i: i8) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_u32(&self, i: u32) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_u64(&self, i: u64) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_u128(&self, i: u128) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_usize(&self, i: u64) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_u8(&self, i: u8) -> Self::Value {
-        todo!()
+        CValue::Scalar(i as i128)
     }
 
     fn const_real(&self, t: Self::Type, val: f64) -> Self::Value {
@@ -78,11 +78,17 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn const_to_opt_uint(&self, v: Self::Value) -> Option<u64> {
-        todo!()
+        match v {
+            CValue::Scalar(v) if v >= 0 => Some(v as u64),
+            _ => None,
+        }
     }
 
     fn const_to_opt_u128(&self, v: Self::Value, sign_ext: bool) -> Option<u128> {
-        todo!()
+        match v {
+            CValue::Scalar(v) if v >= 0 => Some(v as u128),
+            _ => None,
+        }
     }
 
     fn const_data_from_alloc(&self, alloc: ConstAllocation<'_>) -> Self::Value {

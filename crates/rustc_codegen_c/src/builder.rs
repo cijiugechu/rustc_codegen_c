@@ -5,8 +5,9 @@ use std::ops::Deref;
 use rustc_abi::{HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::CFunc;
-use rustc_codegen_c_ast::ty::CTy;
+use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods};
+use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{
@@ -46,7 +47,7 @@ impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
 
 impl<'tcx, 'mx> HasDataLayout for Builder<'_, 'tcx, 'mx> {
     fn data_layout(&self) -> &TargetDataLayout {
-        todo!()
+        &self.cx.tcx.data_layout
     }
 }
 
@@ -77,7 +78,7 @@ impl<'tcx, 'mx> BackendTypes for Builder<'_, 'tcx, 'mx> {
 
 impl<'tcx, 'mx> HasTargetSpec for Builder<'_, 'tcx, 'mx> {
     fn target_spec(&self) -> &Target {
-        todo!()
+        &self.cx.tcx.sess.target
     }
 }
 
@@ -413,15 +414,22 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value {
-        todo!()
+        val
     }
 
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: rustc_abi::Scalar) -> Self::Value {
-        todo!()
+        val
     }
 
     fn alloca(&mut self, size: rustc_abi::Size, align: rustc_abi::Align) -> Self::Value {
-        todo!()
+        let ret = self.bb.0.next_local_var();
+        let bytes = size.bytes_usize();
+        let ty = CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes)),
+        ));
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, None)));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: rustc_abi::Align) -> Self::Value {
@@ -472,7 +480,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         align: rustc_abi::Align,
     ) -> Self::Value {
-        todo!()
+        val
     }
 
     fn store_with_flags(
@@ -482,7 +490,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         align: rustc_abi::Align,
         flags: rustc_codegen_ssa::MemFlags,
     ) -> Self::Value {
-        todo!()
+        self.store(val, ptr, align)
     }
 
     fn atomic_store(
@@ -496,7 +504,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
-        todo!()
+        ptr
     }
 
     fn inbounds_gep(
@@ -505,7 +513,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         indices: &[Self::Value],
     ) -> Self::Value {
-        todo!()
+        ptr
     }
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
@@ -753,11 +761,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn lifetime_start(&mut self, ptr: Self::Value, size: rustc_abi::Size) {
-        todo!()
+        // no-op for C backend
     }
 
     fn lifetime_end(&mut self, ptr: Self::Value, size: rustc_abi::Size) {
-        todo!()
+        // no-op for C backend
     }
 
     fn call(
