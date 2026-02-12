@@ -10,6 +10,7 @@ use crate::Run;
 pub struct Manifest {
     pub verbose: bool,
     pub release: bool,
+    pub optimize: bool,
     pub out_dir: PathBuf,
 }
 

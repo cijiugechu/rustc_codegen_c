@@ -1,4 +1,5 @@
 use rustc_abi::{BackendRepr, Integer, Primitive};
+use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
@@ -8,6 +9,51 @@ use rustc_target::callconv::FnAbi;
 use rustc_type_ir::TyKind;
 
 use crate::context::CodegenCx;
+
+impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
+    pub(crate) fn define_repr_c_primitive_struct(
+        &self,
+        adt_def: rustc_middle::ty::AdtDef<'tcx>,
+        args: rustc_middle::ty::GenericArgsRef<'tcx>,
+    ) -> CTy<'mx> {
+        if let Some(ty) = self.struct_types.borrow().get(&adt_def.did()).copied() {
+            return ty;
+        }
+
+        if !adt_def.is_struct() {
+            panic!("only repr(C) structs are supported, got {}", adt_def.descr());
+        }
+        if !adt_def.repr().c() {
+            panic!("only repr(C) structs are supported");
+        }
+
+        let name = self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str());
+        let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+
+        let variant = adt_def.non_enum_variant();
+        let mut fields = Vec::with_capacity(variant.fields.len());
+        for field in variant.fields.iter() {
+            let field_name = self.mcx.alloc_str(field.name.as_str());
+            let field_ty = field.ty(self.tcx, args);
+            let field_layout = self.layout_of(field_ty);
+            let field_cty = self.immediate_backend_type(field_layout);
+            match field_cty {
+                CTy::Int(_) | CTy::UInt(_) => {}
+                _ => panic!("only primitive integer fields are supported in repr(C) structs"),
+            }
+            fields.push((field_name, field_cty));
+        }
+
+        self.struct_types.borrow_mut().insert(adt_def.did(), cty);
+        self.struct_fields.borrow_mut().insert(cty, fields.clone());
+        self.mcx.module().push_struct(CStructDef {
+            name,
+            fields: fields.iter().map(|(name, ty)| CStructField { name, ty: *ty }).collect(),
+        });
+
+        cty
+    }
+}
 
 impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
@@ -19,7 +65,8 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 let array = self.mcx.arena().alloc(CTyKind::Array(elem, layout.fields.count()));
                 CTy::Ref(Interned::new_unchecked(array))
             }
-            _ => todo!(),
+            TyKind::Adt(adt_def, args) => self.define_repr_c_primitive_struct(*adt_def, args),
+            _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
     }
 
@@ -43,7 +90,11 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         match layout.ty.kind() {
             TyKind::Int(int) => self.mcx.get_int_type(*int),
             TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
-            _ => todo!(),
+            TyKind::Never => CTy::Void,
+            TyKind::Ref(..) | TyKind::RawPtr(..) => CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+            )),
+            _ => todo!("unsupported immediate_backend_type: {:?}", layout.ty.kind()),
         }
     }
 

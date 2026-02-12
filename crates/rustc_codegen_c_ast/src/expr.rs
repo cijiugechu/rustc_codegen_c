@@ -83,6 +83,11 @@ impl<'mx> ModuleCtx<'mx> {
         self.expr(CExprKind::Member { expr, field, arrow: false })
     }
 
+    /// Create a new pointer member access expression.
+    pub fn member_arrow(&self, expr: CExpr<'mx>, field: &'mx str) -> CExpr<'mx> {
+        self.expr(CExprKind::Member { expr, field, arrow: true })
+    }
+
     /// Create a new unary expression.
     pub fn unary(&self, op: &'static str, expr: CExpr<'mx>) -> CExpr<'mx> {
         self.expr(CExprKind::Unary { op, expr })

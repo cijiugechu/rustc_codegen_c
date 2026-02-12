@@ -142,6 +142,16 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
     fn pointer_to(&self, pointee: CTy<'mx>) -> CTy<'mx> {
         CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
     }
+
+    fn store_ty_from_align(&self, align: rustc_abi::Align) -> CTy<'mx> {
+        match align.bytes() {
+            1 => CTy::UInt(CUintTy::U8),
+            2 => CTy::UInt(CUintTy::U16),
+            4 => CTy::UInt(CUintTy::U32),
+            8 => CTy::UInt(CUintTy::U64),
+            _ => CTy::UInt(CUintTy::U8),
+        }
+    }
 }
 
 impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
@@ -444,7 +454,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: rustc_abi::Align) -> Self::Value {
-        let expr = self.mcx.unary("*", self.mcx.value(ptr));
+        let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));
+        let expr = self.mcx.unary("*", cast_ptr);
 
         let ret = self.bb.0.next_local_var();
         self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
@@ -510,7 +521,18 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         align: rustc_abi::Align,
     ) -> Self::Value {
-        let lhs = self.mcx.unary("*", self.mcx.value(ptr));
+        let store_ty = self
+            .value_ty(val)
+            .or_else(|| match self.value_ty(ptr) {
+                Some(CTy::Ref(kind)) => match kind.0 {
+                    CTyKind::Pointer(elem) => Some(*elem),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .unwrap_or_else(|| self.store_ty_from_align(align));
+        let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
+        let lhs = self.mcx.unary("*", cast_ptr);
         let assign = self.mcx.binary(lhs, self.mcx.value(val), "=");
         self.bb.0.push_stmt(self.mcx.expr_stmt(assign));
         val
@@ -539,6 +561,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
         let mut expr = self.mcx.value(ptr);
         let mut projected_ty = ty;
+        let mut projected = false;
 
         for (i, index) in indices.iter().enumerate() {
             let index = self.require_const_usize(*index, "gep");
@@ -546,6 +569,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             if i == 0 && index == 0 {
                 continue;
             }
+            projected = true;
 
             projected_ty = match projected_ty {
                 CTy::Ref(kind) => match kind.0 {
@@ -553,13 +577,41 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                         expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
                         *elem
                     }
-                    CTyKind::Pointer(_) => panic!("gep on pointer values is not supported yet"),
+                    CTyKind::Pointer(elem) => {
+                        expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                        *elem
+                    }
+                    CTyKind::Struct(_) => {
+                        let fields = self
+                            .cx
+                            .struct_fields
+                            .borrow()
+                            .get(&projected_ty)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                panic!("missing struct field metadata for {projected_ty:?}")
+                            });
+                        let (field, field_ty) = fields
+                            .get(index)
+                            .copied()
+                            .unwrap_or_else(|| panic!("invalid struct field index {index}"));
+                        expr = if i == 1 {
+                            self.mcx.member_arrow(expr, field)
+                        } else {
+                            self.mcx.member(expr, field)
+                        };
+                        field_ty
+                    }
                 },
                 _ => {
                     expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
                     projected_ty
                 }
             };
+        }
+
+        if !projected {
+            return ptr;
         }
 
         let ret = self.bb.0.next_local_var();

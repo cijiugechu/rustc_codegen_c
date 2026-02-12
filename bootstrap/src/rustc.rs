@@ -1,5 +1,4 @@
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use regex::Regex;
@@ -27,12 +26,11 @@ impl Run for RustcCommand {
         self.build_auxiliaries(manifest);
 
         let mut command = manifest.rustc();
-        command
-            .arg(&self.source)
-            .args(["--crate-type", "bin"])
-            .arg("--out-dir")
-            .arg(&manifest.out_dir)
-            .args(&self.slop);
+        command.arg(&self.source).args(["--crate-type", "bin"]);
+        if manifest.optimize {
+            command.arg("-O");
+        }
+        command.arg("--out-dir").arg(&manifest.out_dir).args(&self.slop);
         if self.verbose {
             command.env("RUST_BACKTRACE", "full");
         }

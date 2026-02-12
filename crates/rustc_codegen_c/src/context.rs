@@ -11,6 +11,8 @@ use rustc_codegen_c_ast::ty::CTy;
 use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::BackendTypes;
 use rustc_hash::FxHashMap;
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::DefId;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOfHelpers, TyAndLayout,
 };
@@ -38,12 +40,56 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
+    /// Mapping from Rust ADT definitions to C struct types.
+    pub struct_types: RefCell<FxHashMap<DefId, CTy<'mx>>>,
+    /// Mapping from C struct types to field metadata.
+    pub struct_fields: RefCell<FxHashMap<CTy<'mx>, Vec<(&'mx str, CTy<'mx>)>>>,
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     pub fn new(tcx: TyCtxt<'tcx>, mcx: ModuleCtx<'mx>) -> Self {
         mcx.module().push_include("stdint.h");
-        Self { tcx, mcx, function_instances: RefCell::new(FxHashMap::default()) }
+        mcx.module().push_include("stddef.h");
+        mcx.module().push_include("stdlib.h");
+        let cx = Self {
+            tcx,
+            mcx,
+            function_instances: RefCell::new(FxHashMap::default()),
+            struct_types: RefCell::new(FxHashMap::default()),
+            struct_fields: RefCell::new(FxHashMap::default()),
+        };
+        cx.predeclare_repr_c_structs();
+        cx
+    }
+
+    fn predeclare_repr_c_structs(&self) {
+        for def_id in self.tcx.hir_crate_items(()).definitions() {
+            if self.tcx.def_kind(def_id) != DefKind::Struct {
+                continue;
+            }
+
+            let ty = self.tcx.type_of(def_id).instantiate_identity();
+            let rustc_type_ir::TyKind::Adt(adt_def, args) = ty.kind() else {
+                continue;
+            };
+
+            if !adt_def.repr().c() {
+                continue;
+            }
+
+            let variant = adt_def.non_enum_variant();
+            let all_primitive_ints = variant.fields.iter().all(|field| {
+                let field_ty = field.ty(self.tcx, args);
+                matches!(
+                    field_ty.kind(),
+                    rustc_type_ir::TyKind::Int(_) | rustc_type_ir::TyKind::Uint(_)
+                )
+            });
+
+            if all_primitive_ints {
+                self.define_repr_c_primitive_struct(*adt_def, args);
+            }
+        }
     }
 }
 

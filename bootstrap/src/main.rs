@@ -28,6 +28,10 @@ pub struct Cli {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Enable rustc -O for compiled test inputs
+    #[arg(short = 'O', long = "optimize")]
+    pub optimize: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -109,6 +113,7 @@ fn main() {
     let manifest = Manifest {
         verbose: cli.verbose,
         release: cli.release,
+        optimize: cli.optimize,
         out_dir: cli.out_dir.unwrap_or("build".to_string()).into(),
     };
 

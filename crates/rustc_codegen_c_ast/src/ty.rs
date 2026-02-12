@@ -180,6 +180,8 @@ pub enum CTyKind<'mx> {
     Pointer(CTy<'mx>),
     /// An array type with element type and size.
     Array(CTy<'mx>, usize),
+    /// A struct type by name.
+    Struct(&'mx str),
 }
 
 impl<'mx> ModuleCtx<'mx> {
@@ -249,24 +251,28 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
     if let Some(val) = val {
         decl_parts.push_front(DeclaratorPart::Ident(val));
     }
-    while let CTy::Ref(kind) = ty {
-        match kind.0 {
-            CTyKind::Pointer(ty) => {
-                decl_parts.push_front(DeclaratorPart::Ptr);
-                if ty.is_array() {
-                    decl_parts.push_front(DeclaratorPart::Lp);
-                    decl_parts.push_back(DeclaratorPart::Rp);
+    let base_ty = loop {
+        match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(inner) => {
+                    decl_parts.push_front(DeclaratorPart::Ptr);
+                    if inner.is_array() {
+                        decl_parts.push_front(DeclaratorPart::Lp);
+                        decl_parts.push_back(DeclaratorPart::Rp);
+                    }
+                    ty = *inner;
                 }
-            }
-            CTyKind::Array(_, dim) => decl_parts.push_back(DeclaratorPart::ArrayDim(*dim)),
+                CTyKind::Array(inner, dim) => {
+                    decl_parts.push_back(DeclaratorPart::ArrayDim(*dim));
+                    ty = *inner;
+                }
+                CTyKind::Struct(name) => break format!("struct {name}"),
+            },
+            _ => break ty.to_str().to_string(),
         }
-        ty = match kind.0 {
-            CTyKind::Pointer(ty) => *ty,
-            CTyKind::Array(ty, _) => *ty,
-        };
-    }
+    };
 
-    ctx.word(ty.to_str()); // `ty` should be a primitive type here
+    ctx.word(base_ty);
     if val.is_some() || !decl_parts.is_empty() {
         ctx.nbsp();
     }

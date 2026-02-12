@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 
+use crate::cstruct::CStructDef;
 use crate::decl::CDecl;
 use crate::func::{print_func_decl, CFunc};
 use crate::pretty::{Print, PrinterCtx};
@@ -15,6 +16,8 @@ pub struct Module<'mx> {
     pub helper: &'static str,
     /// Declarations.
     pub decls: RefCell<Vec<CDecl<'mx>>>,
+    /// Struct declarations.
+    pub structs: RefCell<Vec<CStructDef<'mx>>>,
     /// Function definitions.
     pub funcs: RefCell<Vec<CFunc<'mx>>>,
 }
@@ -26,6 +29,7 @@ impl<'mx> Module<'mx> {
             includes: RefCell::new(Vec::new()),
             helper,
             decls: RefCell::new(Vec::new()),
+            structs: RefCell::new(Vec::new()),
             funcs: RefCell::new(Vec::new()),
         }
     }
@@ -38,6 +42,11 @@ impl<'mx> Module<'mx> {
     /// Push a declaration to the end of the declarations list.
     pub fn push_decl(&self, decl: CDecl<'mx>) {
         self.decls.borrow_mut().push(decl);
+    }
+
+    /// Push a struct declaration to the end of the declarations list.
+    pub fn push_struct(&self, def: CStructDef<'mx>) {
+        self.structs.borrow_mut().push(def);
     }
 
     /// Push a function definition to the end of the function definitions list.
@@ -59,6 +68,12 @@ impl Print for Module<'_> {
             ctx.hardbreak();
 
             ctx.word(self.helper);
+
+            for def in self.structs.borrow().iter() {
+                ctx.hardbreak();
+                ctx.hardbreak();
+                def.print_to(ctx);
+            }
 
             for &decl in self.decls.borrow().iter() {
                 ctx.hardbreak();

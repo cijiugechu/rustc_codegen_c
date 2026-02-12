@@ -1,22 +1,26 @@
 use rustc_codegen_ssa::traits::BaseTypeCodegenMethods;
+use rustc_data_structures::intern::Interned;
+use rustc_type_ir::{IntTy, UintTy};
+
+use rustc_codegen_c_ast::ty::{CTy, CTyKind};
 
 use crate::context::CodegenCx;
 
 impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     fn type_i8(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::I8)
     }
 
     fn type_i16(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::I16)
     }
 
     fn type_i32(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::I32)
     }
 
     fn type_i64(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::I64)
     }
 
     fn type_i128(&self) -> Self::Type {
@@ -24,7 +28,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_isize(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::Isize)
     }
 
     fn type_f16(&self) -> Self::Type {
@@ -44,7 +48,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_array(&self, ty: Self::Type, len: u64) -> Self::Type {
-        todo!()
+        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Array(ty, len as usize))))
     }
 
     fn type_func(&self, args: &[Self::Type], ret: Self::Type) -> Self::Type {
@@ -56,15 +60,23 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_ptr(&self) -> Self::Type {
-        todo!()
+        CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Pointer(self.mcx.get_uint_type(UintTy::U8))),
+        ))
     }
 
     fn type_ptr_ext(&self, address_space: rustc_abi::AddressSpace) -> Self::Type {
-        todo!()
+        self.type_ptr()
     }
 
     fn element_type(&self, ty: Self::Type) -> Self::Type {
-        todo!()
+        match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(inner) | CTyKind::Array(inner, _) => *inner,
+                CTyKind::Struct(_) => panic!("struct has no scalar element type"),
+            },
+            _ => panic!("not an aggregate type: {ty:?}"),
+        }
     }
 
     fn vector_length(&self, ty: Self::Type) -> usize {
@@ -76,10 +88,30 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn int_width(&self, ty: Self::Type) -> u64 {
-        todo!()
+        match ty {
+            CTy::Int(int) => match int {
+                rustc_codegen_c_ast::ty::CIntTy::Isize => {
+                    self.tcx.data_layout.pointer_size().bits()
+                }
+                rustc_codegen_c_ast::ty::CIntTy::I8 => 8,
+                rustc_codegen_c_ast::ty::CIntTy::I16 => 16,
+                rustc_codegen_c_ast::ty::CIntTy::I32 => 32,
+                rustc_codegen_c_ast::ty::CIntTy::I64 => 64,
+            },
+            CTy::UInt(int) => match int {
+                rustc_codegen_c_ast::ty::CUintTy::Usize => {
+                    self.tcx.data_layout.pointer_size().bits()
+                }
+                rustc_codegen_c_ast::ty::CUintTy::U8 => 8,
+                rustc_codegen_c_ast::ty::CUintTy::U16 => 16,
+                rustc_codegen_c_ast::ty::CUintTy::U32 => 32,
+                rustc_codegen_c_ast::ty::CUintTy::U64 => 64,
+            },
+            _ => panic!("not an integer type: {ty:?}"),
+        }
     }
 
     fn val_ty(&self, v: Self::Value) -> Self::Type {
-        todo!()
+        panic!("val_ty is not supported on CodegenCx")
     }
 }

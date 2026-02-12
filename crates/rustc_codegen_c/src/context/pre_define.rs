@@ -10,6 +10,36 @@ use rustc_middle::ty::{self, Instance};
 
 use crate::context::CodegenCx;
 
+fn is_valid_c_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn sanitize_symbol_name(symbol_name: &str) -> String {
+    if is_valid_c_identifier(symbol_name) {
+        return symbol_name.to_string();
+    }
+
+    let mut out = String::from("__rcgenc_");
+    for byte in symbol_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "_{byte:02X}");
+        }
+    }
+    out
+}
+
 impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn predefine_static(
         &mut self,
@@ -33,7 +63,8 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         let args = fn_abi.args.iter().map(|arg| self.immediate_backend_type(arg.layout));
         let ret = self.immediate_backend_type(fn_abi.ret.layout);
 
-        let func = CFuncKind::new(self.mcx.alloc_str(symbol_name), ret, args);
+        let symbol_name = sanitize_symbol_name(symbol_name);
+        let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args);
         let func = Interned::new_unchecked(self.mcx.func(func));
         self.mcx.module().push_func(func);
         self.function_instances.borrow_mut().insert(instance, func);
