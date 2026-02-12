@@ -930,7 +930,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn pointercast(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+
+        if let Some(pointee) = self.pointer_pointee_ty(val) {
+            self.update_ptr_pointee_ty(ret, pointee);
+        }
+        if let Some(lvalue) = self.pointer_lvalue(val) {
+            self.update_ptr_lvalue(ret, lvalue);
+        }
+
+        ret
     }
 
     fn icmp(

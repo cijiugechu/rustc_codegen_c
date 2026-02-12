@@ -109,6 +109,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         mcx.module().push_include("stdint.h");
         mcx.module().push_include("stddef.h");
         mcx.module().push_include("stdlib.h");
+        mcx.module().push_include("stdio.h");
         let cx = Self {
             tcx,
             mcx,
