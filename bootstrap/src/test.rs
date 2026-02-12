@@ -2,7 +2,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anstream::{eprint as print, eprintln as println};
-use clap::Args;
+use clap::{Args, ValueEnum};
 use color_print::{cprint, cprintln};
 use glob::glob;
 use rayon::prelude::*;
@@ -22,6 +22,20 @@ pub struct TestCommand {
     /// Whether to show verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Test stage to run:
+    /// - compile: compile/build checks only (skip runtime execution)
+    /// - run: compile/build checks plus runtime checks (`//@ run-pass`)
+    #[arg(long, value_enum, default_value_t = TestStage::Run)]
+    pub stage: TestStage,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum, Eq, PartialEq)]
+pub enum TestStage {
+    /// Compile/build-only checks.
+    Compile,
+    /// Compile/build checks and runtime checks.
+    Run,
 }
 
 impl Run for TestCommand {
@@ -35,9 +49,17 @@ impl Run for TestCommand {
         }));
 
         // action: Run cargo test
-        self.log_action_start("running", "cargo test");
         let mut command = std::process::Command::new("cargo");
         command.args(["test", "--manifest-path", "crates/Cargo.toml"]);
+        match self.stage {
+            TestStage::Compile => {
+                self.log_action_start("running", "cargo test --no-run");
+                command.arg("--no-run");
+            }
+            TestStage::Run => {
+                self.log_action_start("running", "cargo test");
+            }
+        }
         self.command_status("cargo", &mut command);
 
         let testcases = self.collect_testcases(manifest);
@@ -227,7 +249,14 @@ impl TestCommand {
         }
 
         if runpass {
-            self.run_and_check_output(testcase, exitcode, stdout, stderr);
+            if self.stage == TestStage::Run {
+                self.run_and_check_output(testcase, exitcode, stdout, stderr);
+            } else {
+                self.log_action_context(
+                    "runtime",
+                    "skipped (`--stage compile` does not execute `//@ run-pass`)",
+                );
+            }
         }
 
         self.log_action_context("result", "all checks passed");

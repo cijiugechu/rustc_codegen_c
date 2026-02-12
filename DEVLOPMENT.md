@@ -83,12 +83,19 @@ Run all tests:
 ./y test
 ```
 
+Run compile/build checks only (skip runtime execution):
+
+```bash
+./y test --stage compile
+```
+
 What this includes:
 
 - `cargo test --manifest-path crates/Cargo.toml`
 - compile checks for `examples/*.rs`
 - codegen checks for `tests/codegen/*.rs` via `FileCheck`
 - blessed output checks for `tests/bless/*.rs`
+- runtime checks from `//@ run-pass` directives (only when `--stage run`, the default)
 
 Update blessed outputs:
 
