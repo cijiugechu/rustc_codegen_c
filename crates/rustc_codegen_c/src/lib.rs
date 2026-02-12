@@ -78,6 +78,11 @@ impl CodegenBackend for CCodegen {
                     .map(str::to_owned),
             );
 
+            // `neon` is ABI-required on AArch64 even when target spec does not list it.
+            if tcx.sess.target.arch == "aarch64" && !features.iter().any(|f| f == "+neon") {
+                features.push("+neon".to_string());
+            }
+
             features
         }
     }
@@ -85,6 +90,9 @@ impl CodegenBackend for CCodegen {
     fn target_config(&self, sess: &Session) -> TargetConfig {
         let (unstable_target_features, target_features) = cfg_target_feature(sess, |feature| {
             if sess.target.arch == "x86_64" && (feature == "x87" || feature == "sse2") {
+                return true;
+            }
+            if sess.target.arch == "aarch64" && feature == "neon" {
                 return true;
             }
 
