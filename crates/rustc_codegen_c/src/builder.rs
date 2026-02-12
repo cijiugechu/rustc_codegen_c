@@ -815,6 +815,16 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
         let mut expr = self.mcx.value(ptr);
+        if let Some(pointee) = self.pointer_pointee_ty(ptr) {
+            if pointee != ty {
+                let cast_ptr_ty = self.pointer_to(ty);
+                let cast_ptr = self.bb.func.0.next_local_var();
+                let cast = self.mcx.cast(cast_ptr_ty, expr);
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(cast_ptr, cast_ptr_ty, Some(cast))));
+                self.record_value_ty(cast_ptr, cast_ptr_ty);
+                expr = self.mcx.value(cast_ptr);
+            }
+        }
         let mut projected_ty = ty;
         let mut projected = false;
 
@@ -822,6 +832,14 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             let const_index = self.cx.const_to_opt_uint(*index).map(|v| v as usize);
 
             if i == 0 && const_index == Some(0) && indices.len() > 1 {
+                if let CTy::Ref(kind) = projected_ty {
+                    match kind.0 {
+                        CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
+                            projected_ty = *elem;
+                        }
+                        CTyKind::Struct(_) => {}
+                    }
+                }
                 continue;
             }
             projected = true;
@@ -1243,6 +1261,18 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 
         let fn_abi = fn_abi.unwrap();
+
+        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
+            if let Some(ret_ptr) = args.first().copied() {
+                self.ensure_alloca_decl(ret_ptr, Some(self.cx.backend_type(fn_abi.ret.layout)));
+            }
+        }
+        let arg_start = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
+        for (abi_arg, value) in fn_abi.args.iter().zip(args.iter().skip(arg_start)) {
+            if matches!(abi_arg.mode, PassMode::Indirect { meta_attrs: None, .. }) {
+                self.ensure_alloca_decl(*value, Some(self.cx.backend_type(abi_arg.layout)));
+            }
+        }
 
         let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
         let mut callee = llfn;

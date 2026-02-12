@@ -72,6 +72,48 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         cty
     }
+
+    pub(crate) fn define_tuple_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
+        if let Some(ty) = self.adt_types.borrow().get(&layout.ty).copied() {
+            return ty;
+        }
+
+        let TyKind::Tuple(fields_tys) = layout.ty.kind() else {
+            panic!("expected tuple type, got {:?}", layout.ty.kind());
+        };
+
+        let name = self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.struct_layouts.borrow().len()));
+        let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+
+        let mut fields = Vec::with_capacity(fields_tys.len());
+        let mut struct_fields = Vec::with_capacity(fields_tys.len());
+        for i in 0..fields_tys.len() {
+            let field_name = self.mcx.alloc_str(&format!("f{i}"));
+            let field_layout = layout.field(&*self, i);
+            let field_cty = self.backend_type(field_layout);
+            fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: field_cty,
+                offset: layout.fields.offset(i).bytes_usize(),
+                size: field_layout.size.bytes_usize(),
+            });
+            struct_fields.push(CStructField { name: field_name, ty: field_cty });
+        }
+
+        let layout_info = AdtLayoutInfo {
+            size: layout.size.bytes_usize(),
+            align: layout.align.abi.bytes() as usize,
+            repr_c: false,
+            fields: fields.clone(),
+        };
+
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
+        self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
+        self.struct_layouts.borrow_mut().insert(cty, layout_info);
+        self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
+        cty
+    }
 }
 
 impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
@@ -86,6 +128,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 CTy::Ref(Interned::new_unchecked(array))
             }
             TyKind::Adt(adt_def, args) => self.define_simple_struct_layout(layout, *adt_def, args),
+            TyKind::Tuple(..) => self.define_tuple_layout(layout),
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
     }

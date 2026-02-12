@@ -303,7 +303,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
     pub(crate) fn indirect_ptr_ty_for_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
         let pointee = match layout.ty.kind() {
-            TyKind::Adt(..) | TyKind::Array(..) => self.backend_type(layout),
+            TyKind::Adt(..) | TyKind::Array(..) | TyKind::Tuple(..) => self.backend_type(layout),
             _ => CTy::UInt(CUintTy::U8),
         };
         CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
