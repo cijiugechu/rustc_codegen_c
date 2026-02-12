@@ -383,13 +383,14 @@ impl TestCase {
     /// Get the generated C file f
     pub fn generated(&self) -> PathBuf {
         let case = self.source.file_stem().unwrap().to_string_lossy();
+        let prefix = format!("{case}.");
         let generated = std::fs::read_dir(self.output_file.parent().unwrap())
             .unwrap()
             .filter_map(|entry| entry.ok())
             .find(|entry| {
                 let filename = entry.file_name();
                 let filename = filename.to_string_lossy();
-                filename.ends_with(".c") && filename.starts_with(case.as_ref())
+                filename.ends_with(".c") && filename.starts_with(prefix.as_str())
             });
 
         assert!(generated.is_some(), "could not find {case}'s generated file");
