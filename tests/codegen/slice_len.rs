@@ -1,18 +1,21 @@
 //! Test local slice fat pointer materialization.
 
-//@ aux-build:mini_core.rs
 //@ run-pass
-//@ exit-code: 0
+//@ exit-code: 4
 
-#![feature(no_core)]
-#![no_core]
+#![no_std]
 #![no_main]
 
-extern crate mini_core;
+use core::panic::PanicInfo;
+
+#[panic_handler]
+fn panic(_info: &PanicInfo) -> ! {
+    loop {}
+}
 
 #[inline(never)]
-fn use_slice(_s: &[u8]) -> i32 {
-    0
+fn use_slice(s: &[u8]) -> i32 {
+    s.len() as i32
 }
 
 #[inline(never)]
@@ -24,6 +27,7 @@ pub fn local_slice_copy(s: &[u8]) -> i32 {
 
 // CHECK-LABEL: main
 #[no_mangle]
-pub fn main() -> i32 {
-    0
+pub extern "C" fn main() -> i32 {
+    let data = [1_u8, 2, 3, 4];
+    local_slice_copy(&data)
 }
