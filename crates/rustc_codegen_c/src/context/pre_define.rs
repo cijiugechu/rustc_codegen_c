@@ -106,11 +106,7 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 self.scalar_pair_element_backend_type(fn_abi.ret.layout, 0, true),
                 self.scalar_pair_element_backend_type(fn_abi.ret.layout, 1, true),
             ]),
-            PassMode::Cast { ref cast, pad_i32: _ } => {
-                let fields =
-                    self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty).collect::<Vec<_>>();
-                self.abi_tuple_ty(&fields)
-            }
+            PassMode::Cast { ref cast, pad_i32: _ } => self.cast_backend_type(cast),
         };
 
         let symbol_name = sanitize_symbol_name(symbol_name);

@@ -1,4 +1,4 @@
-use rustc_abi::{BackendRepr, Integer, Primitive};
+use rustc_abi::{BackendRepr, Integer, Primitive, RegKind};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
@@ -139,6 +139,49 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
         cty
     }
+
+    pub(crate) fn define_data_enum_layout(
+        &self,
+        layout: TyAndLayout<'tcx>,
+        adt_def: rustc_middle::ty::AdtDef<'tcx>,
+    ) -> CTy<'mx> {
+        if let Some(ty) = self.adt_types.borrow().get(&layout.ty).copied() {
+            return ty;
+        }
+
+        assert!(adt_def.is_enum(), "expected enum ADT, got {}", adt_def.descr());
+        let size = layout.size.bytes_usize();
+        assert!(size > 0, "data enum with zero-sized layout is not supported: {:?}", layout.ty);
+
+        let name =
+            self.mcx.alloc_str(&format!("__rcgenc_enum_{}", self.struct_layouts.borrow().len()));
+        let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+        let mut fields = Vec::with_capacity(size);
+        let mut struct_fields = Vec::with_capacity(size);
+        for i in 0..size {
+            let field_name = self.mcx.alloc_str(&format!("b{i}"));
+            fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: CTy::UInt(CUintTy::U8),
+                offset: i,
+                size: 1,
+            });
+            struct_fields.push(CStructField { name: field_name, ty: CTy::UInt(CUintTy::U8) });
+        }
+        let layout_info = AdtLayoutInfo {
+            size,
+            align: layout.align.abi.bytes() as usize,
+            repr_c: false,
+            fields: fields.clone(),
+        };
+
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
+        self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
+        self.struct_layouts.borrow_mut().insert(cty, layout_info);
+        self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
+        cty
+    }
 }
 
 impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
@@ -156,7 +199,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 if self.is_fieldless_enum(*adt_def) {
                     self.immediate_backend_type(layout)
                 } else if adt_def.is_enum() {
-                    todo!("data-carrying enums are not supported yet: {:?}", layout.ty)
+                    self.define_data_enum_layout(layout, *adt_def)
                 } else {
                     self.define_simple_struct_layout(layout, *adt_def, args)
                 }
@@ -167,7 +210,13 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn cast_backend_type(&self, ty: &rustc_target::callconv::CastTarget) -> Self::Type {
-        todo!()
+        let fields =
+            self.cast_target_to_c_abi_pieces(ty).into_iter().map(|(_, ty)| ty).collect::<Vec<_>>();
+        match fields.as_slice() {
+            [] => CTy::Void,
+            [single] => *single,
+            _ => self.abi_tuple_ty(&fields),
+        }
     }
 
     fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
@@ -179,7 +228,13 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn reg_backend_type(&self, ty: &rustc_abi::Reg) -> Self::Type {
-        todo!()
+        match (ty.kind, ty.size.bytes()) {
+            (RegKind::Integer, 1) => CTy::UInt(CUintTy::U8),
+            (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
+            (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
+            (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            _ => panic!("unsupported ABI register for C backend: {ty:?}"),
+        }
     }
 
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {

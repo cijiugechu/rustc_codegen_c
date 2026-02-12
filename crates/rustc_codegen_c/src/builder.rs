@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BuilderMethods, ConstCodegenMethods, LayoutTypeCodegenMethods,
 };
@@ -306,13 +306,27 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         )))
     }
 
+    fn ensure_alloca_byte_array_decl(&mut self, ptr: CValue<'mx>) {
+        let Some(bytes) = self.pending_alloca_bytes(ptr) else {
+            return;
+        };
+        let decl_ty = CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes.max(1))),
+        ));
+        self.ensure_alloca_decl(ptr, Some(decl_ty));
+    }
+
     fn abi_tuple_ty_for_pair_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
         let a = self.cx.scalar_pair_element_backend_type(layout, 0, true);
         let b = self.cx.scalar_pair_element_backend_type(layout, 1, true);
         self.cx.abi_tuple_ty(&[a, b])
     }
 
-    fn build_abi_tuple_from_values(&mut self, tuple_ty: CTy<'mx>, values: &[CValue<'mx>]) -> CValue<'mx> {
+    fn build_abi_tuple_from_values(
+        &mut self,
+        tuple_ty: CTy<'mx>,
+        values: &[CValue<'mx>],
+    ) -> CValue<'mx> {
         let tuple = self.bb.func.0.next_local_var();
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(tuple, tuple_ty, None)));
         self.record_value_ty(tuple, tuple_ty);
@@ -331,12 +345,21 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         tuple
     }
 
-    fn load_abi_tuple_field(&mut self, tuple: CValue<'mx>, tuple_ty: CTy<'mx>, idx: usize) -> CValue<'mx> {
+    fn load_abi_tuple_field(
+        &mut self,
+        tuple: CValue<'mx>,
+        tuple_ty: CTy<'mx>,
+        idx: usize,
+    ) -> CValue<'mx> {
         let field = self.cx.abi_tuple_field_name(tuple_ty, idx);
         let field_ty = self.cx.abi_tuple_field_ty(tuple_ty, idx);
         let value = self.bb.func.0.next_local_var();
         let field_expr = self.mcx.member(self.mcx.value(tuple), field);
-        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(value, field_ty, Some(field_expr))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            value,
+            field_ty,
+            Some(field_expr),
+        )));
         self.record_value_ty(value, field_ty);
         value
     }
@@ -646,7 +669,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             let backend_bool = CTy::UInt(CUintTy::U8);
             let ret = self.bb.func.0.next_local_var();
             let cast = self.mcx.cast(backend_bool, self.mcx.value(val));
-            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, backend_bool, Some(cast))));
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                ret,
+                backend_bool,
+                Some(cast),
+            )));
             self.record_value_ty(ret, backend_bool);
             return ret;
         }
@@ -820,7 +847,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 let cast_ptr_ty = self.pointer_to(ty);
                 let cast_ptr = self.bb.func.0.next_local_var();
                 let cast = self.mcx.cast(cast_ptr_ty, expr);
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(cast_ptr, cast_ptr_ty, Some(cast))));
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                    cast_ptr,
+                    cast_ptr_ty,
+                    Some(cast),
+                )));
                 self.record_value_ty(cast_ptr, cast_ptr_ty);
                 expr = self.mcx.value(cast_ptr);
             }
@@ -1093,7 +1124,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         size: Self::Value,
         flags: rustc_codegen_ssa::MemFlags,
     ) {
-        todo!()
+        self.ensure_alloca_byte_array_decl(dst);
+        self.ensure_alloca_byte_array_decl(src);
+
+        let void_ptr = self.pointer_to(CTy::Void);
+        let dst_ptr = self.mcx.cast(void_ptr, self.mcx.value(dst));
+        let src_ptr = self.mcx.cast(void_ptr, self.mcx.value(src));
+        let size_arg = match self.value_ty(size) {
+            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(size),
+            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(size)),
+        };
+        let call =
+            self.mcx.call(self.mcx.raw("__builtin_memcpy"), vec![dst_ptr, src_ptr, size_arg]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
     }
 
     fn memmove(
@@ -1105,7 +1148,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         size: Self::Value,
         flags: rustc_codegen_ssa::MemFlags,
     ) {
-        todo!()
+        self.ensure_alloca_byte_array_decl(dst);
+        self.ensure_alloca_byte_array_decl(src);
+
+        let void_ptr = self.pointer_to(CTy::Void);
+        let dst_ptr = self.mcx.cast(void_ptr, self.mcx.value(dst));
+        let src_ptr = self.mcx.cast(void_ptr, self.mcx.value(src));
+        let size_arg = match self.value_ty(size) {
+            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(size),
+            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(size)),
+        };
+        let call =
+            self.mcx.call(self.mcx.raw("__builtin_memmove"), vec![dst_ptr, src_ptr, size_arg]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
     }
 
     fn memset(
@@ -1116,7 +1171,21 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         align: rustc_abi::Align,
         flags: rustc_codegen_ssa::MemFlags,
     ) {
-        todo!()
+        self.ensure_alloca_byte_array_decl(ptr);
+
+        let void_ptr = self.pointer_to(CTy::Void);
+        let dst_ptr = self.mcx.cast(void_ptr, self.mcx.value(ptr));
+        let fill_arg = match self.value_ty(fill_byte) {
+            Some(CTy::Int(CIntTy::I32)) => self.mcx.value(fill_byte),
+            _ => self.mcx.cast(CTy::Int(CIntTy::I32), self.mcx.value(fill_byte)),
+        };
+        let size_arg = match self.value_ty(size) {
+            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(size),
+            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(size)),
+        };
+        let call =
+            self.mcx.call(self.mcx.raw("__builtin_memset"), vec![dst_ptr, fill_arg, size_arg]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
     }
 
     fn select(
@@ -1125,7 +1194,28 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         then_val: Self::Value,
         else_val: Self::Value,
     ) -> Self::Value {
-        todo!()
+        let result_ty = match (self.value_ty(then_val), self.value_ty(else_val)) {
+            (Some(a), Some(b)) if a == b => a,
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (Some(a), Some(b)) => panic!("select value type mismatch: {a:?} vs {b:?}"),
+            (None, None) => panic!("cannot infer select result type"),
+        };
+
+        let cond_expr = self.mcx.value(cond);
+        let then_expr = match self.value_ty(then_val) {
+            Some(ty) if ty != result_ty => self.mcx.cast(result_ty, self.mcx.value(then_val)),
+            _ => self.mcx.value(then_val),
+        };
+        let else_expr = match self.value_ty(else_val) {
+            Some(ty) if ty != result_ty => self.mcx.cast(result_ty, self.mcx.value(else_val)),
+            _ => self.mcx.value(else_val),
+        };
+        let expr = self.mcx.ternary(cond_expr, then_expr, else_expr);
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, result_ty, Some(expr))));
+        self.record_value_ty(ret, result_ty);
+        ret
     }
 
     fn va_arg(&mut self, list: Self::Value, ty: Self::Type) -> Self::Value {
@@ -1299,7 +1389,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     CValue::Scalar(0)
                 } else {
                     let ret = self.bb.func.0.next_local_var();
-                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
+                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                        ret,
+                        ret_ty,
+                        Some(call),
+                    )));
                     self.record_value_ty(ret, ret_ty);
                     ret
                 }
@@ -1307,7 +1401,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             PassMode::Pair(_, _) => {
                 let tuple_ty = self.abi_tuple_ty_for_pair_layout(fn_abi.ret.layout);
                 let tuple = self.bb.func.0.next_local_var();
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(tuple, tuple_ty, Some(call))));
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                    tuple,
+                    tuple_ty,
+                    Some(call),
+                )));
                 self.record_value_ty(tuple, tuple_ty);
 
                 let a = self.load_abi_tuple_field(tuple, tuple_ty, 0);
@@ -1325,7 +1423,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     .collect::<Vec<_>>();
                 let tuple_ty = self.cx.abi_tuple_ty(&field_tys);
                 let ret = self.bb.func.0.next_local_var();
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, tuple_ty, Some(call))));
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                    ret,
+                    tuple_ty,
+                    Some(call),
+                )));
                 self.record_value_ty(ret, tuple_ty);
                 ret
             }

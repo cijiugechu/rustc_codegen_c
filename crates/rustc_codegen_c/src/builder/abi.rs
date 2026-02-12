@@ -1,10 +1,10 @@
+use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_abi::BackendRepr;
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::{
     AbiBuilderMethods, ArgAbiBuilderMethods, BuilderMethods, ConstCodegenMethods,
 };
-use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_middle::ty::Ty;
 use rustc_target::callconv::{ArgAbi, PassMode};
 
@@ -61,8 +61,10 @@ impl<'tcx, 'mx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                     } else {
                         self.inbounds_ptradd(dst.val.llval, self.const_usize(offset as u64))
                     };
-                    let piece_align =
-                        dst.val.align.restrict_for_offset(rustc_abi::Size::from_bytes(offset as u64));
+                    let piece_align = dst
+                        .val
+                        .align
+                        .restrict_for_offset(rustc_abi::Size::from_bytes(offset as u64));
                     self.store(piece, piece_ptr, piece_align);
                 }
             }
@@ -107,16 +109,48 @@ impl<'tcx, 'mx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.store(second, second_ptr, dst.val.align.restrict_for_offset(b_offset));
             }
             PassMode::Cast { ref cast, pad_i32: _ } => {
+                let pieces = self.cx.cast_target_to_c_abi_pieces(cast);
+                if pieces.len() == 1 {
+                    let (offset, piece_ty) = pieces[0];
+                    let piece = match self.value_ty(val) {
+                        Some(val_ty) if val_ty == piece_ty => val,
+                        _ => {
+                            let casted = self.bb.func.0.next_local_var();
+                            let cast_expr = self.mcx.cast(piece_ty, self.mcx.value(val));
+                            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                                casted,
+                                piece_ty,
+                                Some(cast_expr),
+                            )));
+                            self.record_value_ty(casted, piece_ty);
+                            casted
+                        }
+                    };
+                    let piece_ptr = if offset == 0 {
+                        dst.val.llval
+                    } else {
+                        self.inbounds_ptradd(dst.val.llval, self.const_usize(offset as u64))
+                    };
+                    let piece_align = dst
+                        .val
+                        .align
+                        .restrict_for_offset(rustc_abi::Size::from_bytes(offset as u64));
+                    self.store(piece, piece_ptr, piece_align);
+                    return;
+                }
+
                 let tuple_ty = self
                     .value_ty(val)
                     .unwrap_or_else(|| panic!("cast return value without type metadata: {val:?}"));
-                for (i, (offset, piece_ty)) in
-                    self.cx.cast_target_to_c_abi_pieces(cast).into_iter().enumerate()
-                {
+                for (i, (offset, piece_ty)) in pieces.into_iter().enumerate() {
                     let field = self.cx.abi_tuple_field_name(tuple_ty, i);
                     let expr = self.mcx.member(self.mcx.value(val), field);
                     let piece = self.bb.func.0.next_local_var();
-                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(piece, piece_ty, Some(expr))));
+                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                        piece,
+                        piece_ty,
+                        Some(expr),
+                    )));
                     self.record_value_ty(piece, piece_ty);
 
                     let piece_ptr = if offset == 0 {
@@ -124,8 +158,10 @@ impl<'tcx, 'mx> ArgAbiBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                     } else {
                         self.inbounds_ptradd(dst.val.llval, self.const_usize(offset as u64))
                     };
-                    let piece_align =
-                        dst.val.align.restrict_for_offset(rustc_abi::Size::from_bytes(offset as u64));
+                    let piece_align = dst
+                        .val
+                        .align
+                        .restrict_for_offset(rustc_abi::Size::from_bytes(offset as u64));
                     self.store(piece, piece_ptr, piece_align);
                 }
             }

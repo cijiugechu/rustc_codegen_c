@@ -32,6 +32,8 @@ pub enum CExprKind<'mx> {
     Value(CValue<'mx>),
     /// A binary operation expression, e.g. `lhs + rhs`.
     Binary { lhs: CExpr<'mx>, rhs: CExpr<'mx>, op: &'static str },
+    /// A ternary expression, e.g. `cond ? then_expr : else_expr`.
+    Ternary { cond: CExpr<'mx>, then_expr: CExpr<'mx>, else_expr: CExpr<'mx> },
     /// A type cast expression, e.g. `(int) x`.
     Cast { ty: CTy<'mx>, expr: CExpr<'mx> },
     /// A function call expression, e.g. `foo(x, y)`.
@@ -68,6 +70,16 @@ impl<'mx> ModuleCtx<'mx> {
     /// Create a new binary expression.
     pub fn binary(&self, lhs: CExpr<'mx>, rhs: CExpr<'mx>, op: &'static str) -> CExpr<'mx> {
         self.expr(CExprKind::Binary { lhs, rhs, op })
+    }
+
+    /// Create a new ternary expression.
+    pub fn ternary(
+        &self,
+        cond: CExpr<'mx>,
+        then_expr: CExpr<'mx>,
+        else_expr: CExpr<'mx>,
+    ) -> CExpr<'mx> {
+        self.expr(CExprKind::Ternary { cond, then_expr, else_expr })
     }
 
     /// Create a new cast expression.
@@ -126,6 +138,19 @@ impl Print for CExpr<'_> {
 
                 rhs.print_to(ctx);
             }),
+            CExprKind::Ternary { cond, then_expr, else_expr } => {
+                ctx.ibox_delim(INDENT, ("(", ")"), 0, |ctx| {
+                    cond.print_to(ctx);
+                    ctx.softbreak();
+                    ctx.word("?");
+                    ctx.nbsp();
+                    then_expr.print_to(ctx);
+                    ctx.softbreak();
+                    ctx.word(":");
+                    ctx.nbsp();
+                    else_expr.print_to(ctx);
+                })
+            }
             CExprKind::Cast { ty, expr } => ctx.ibox(INDENT, |ctx| {
                 ctx.word("(");
                 print_declarator(*ty, None, ctx);

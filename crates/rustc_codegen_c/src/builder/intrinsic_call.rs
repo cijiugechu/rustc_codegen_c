@@ -21,7 +21,7 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
     }
 
     fn assume(&mut self, val: Self::Value) {
-        todo!()
+        let _ = val;
     }
 
     fn expect(&mut self, cond: Self::Value, expected: bool) -> Self::Value {
