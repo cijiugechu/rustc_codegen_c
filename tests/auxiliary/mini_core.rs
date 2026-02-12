@@ -14,6 +14,9 @@ pub trait Sized: MetaSized {}
 #[lang = "copy"]
 pub trait Copy {}
 
+#[lang = "sync"]
+pub unsafe trait Sync {}
+
 #[lang = "add"]
 pub trait Add<Rhs = Self> {
     type Output;
@@ -66,6 +69,25 @@ impl Copy for char {}
 impl<'a, T: ?Sized> Copy for &'a T {}
 impl<T: ?Sized> Copy for *const T {}
 impl<T: ?Sized> Copy for *mut T {}
+
+unsafe impl<T: ?Sized> Sync for &T {}
+unsafe impl<T: ?Sized> Sync for *const T {}
+unsafe impl<T: ?Sized> Sync for *mut T {}
+unsafe impl Sync for bool {}
+unsafe impl Sync for u8 {}
+unsafe impl Sync for u16 {}
+unsafe impl Sync for u32 {}
+unsafe impl Sync for u64 {}
+unsafe impl Sync for usize {}
+unsafe impl Sync for i8 {}
+unsafe impl Sync for i16 {}
+unsafe impl Sync for i32 {}
+unsafe impl Sync for i64 {}
+unsafe impl Sync for isize {}
+unsafe impl Sync for f32 {}
+unsafe impl Sync for f64 {}
+unsafe impl Sync for char {}
+unsafe impl Sync for str {}
 
 macro_rules! impl_add_for_int {
     ($($ty:ty),* $(,)?) => {
@@ -145,6 +167,9 @@ struct PanicLocation {
     line: u32,
     column: u32,
 }
+
+#[lang = "drop_in_place"]
+unsafe fn drop_in_place<T: ?Sized>(_to_drop: *mut T) {}
 
 unsafe extern "C" {
     fn __rust_panic_bounds_check(index: usize, len: usize) -> !;

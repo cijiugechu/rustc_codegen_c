@@ -2,7 +2,6 @@ use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_ssa::traits::ConstCodegenMethods;
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 use rustc_middle::mir::interpret::GlobalAlloc;
-use rustc_middle::ty::Instance;
 
 use crate::context::CodegenCx;
 
@@ -67,13 +66,13 @@ fn value_expr_text(value: CValue<'_>) -> String {
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
-    fn const_bytes_pointer(&self, bytes: &[u8]) -> CValue<'mx> {
+    pub(crate) fn const_bytes_pointer(&self, bytes: &[u8]) -> CValue<'mx> {
         let literal = c_string_literal_from_bytes(bytes);
         let expr = self.mcx.alloc_str(&format!("((uint8_t *){literal})"));
         CValue::Func(expr)
     }
 
-    fn symbol_value(&self, symbol_name: &str) -> CValue<'mx> {
+    pub(crate) fn symbol_value(&self, symbol_name: &str) -> CValue<'mx> {
         let symbol_name = sanitize_symbol_name(symbol_name);
         CValue::Func(self.mcx.alloc_str(&symbol_name))
     }
@@ -188,8 +187,9 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
                         self.symbol_value(self.tcx.symbol_name(instance).name)
                     }
                     GlobalAlloc::Static(def_id) => {
-                        let instance = Instance::mono(self.tcx, def_id);
-                        self.symbol_value(self.tcx.symbol_name(instance).name)
+                        let symbol = self.static_symbol(def_id);
+                        let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));
+                        CValue::Func(expr)
                     }
                     GlobalAlloc::VTable(..) | GlobalAlloc::TypeId { .. } => CValue::Scalar(0),
                 };

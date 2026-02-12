@@ -49,7 +49,8 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         visibility: Visibility,
         symbol_name: &str,
     ) {
-        todo!()
+        let _ = (linkage, visibility);
+        self.register_static_symbol(def_id, symbol_name);
     }
 
     fn predefine_fn(

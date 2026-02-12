@@ -86,6 +86,8 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
+    /// Mapping from Rust static definitions to their generated C symbols.
+    pub static_symbols: RefCell<FxHashMap<DefId, &'mx str>>,
     /// Per-function value type cache shared across basic blocks.
     pub value_tys: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
     /// Per-function virtual packed scalar pairs used by extract/insert helpers.
@@ -116,6 +118,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             tcx,
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
+            static_symbols: RefCell::new(FxHashMap::default()),
             value_tys: RefCell::new(FxHashMap::default()),
             packed_scalar_pairs: RefCell::new(FxHashMap::default()),
             ptr_pointees: RefCell::new(FxHashMap::default()),
@@ -128,6 +131,26 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         };
         cx.predeclare_repr_c_structs();
         cx
+    }
+
+    pub(crate) fn register_static_symbol(&self, def_id: DefId, symbol_name: &str) -> &'mx str {
+        if let Some(symbol) = self.static_symbols.borrow().get(&def_id).copied() {
+            return symbol;
+        }
+
+        let symbol_name = sanitize_symbol_name(symbol_name);
+        let symbol_name = self.mcx.alloc_str(&symbol_name);
+        self.static_symbols.borrow_mut().insert(def_id, symbol_name);
+        symbol_name
+    }
+
+    pub(crate) fn static_symbol(&self, def_id: DefId) -> &'mx str {
+        if let Some(symbol) = self.static_symbols.borrow().get(&def_id).copied() {
+            return symbol;
+        }
+
+        let instance = Instance::mono(self.tcx, def_id);
+        self.register_static_symbol(def_id, self.tcx.symbol_name(instance).name)
     }
 
     fn predeclare_repr_c_structs(&self) {
@@ -162,6 +185,36 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             }
         }
     }
+}
+
+fn is_valid_c_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn sanitize_symbol_name(symbol_name: &str) -> String {
+    if is_valid_c_identifier(symbol_name) {
+        return symbol_name.to_string();
+    }
+
+    let mut out = String::from("__rcgenc_");
+    for byte in symbol_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "_{byte:02X}");
+        }
+    }
+    out
 }
 
 impl<'tcx, 'mx> BackendTypes for CodegenCx<'tcx, 'mx> {
