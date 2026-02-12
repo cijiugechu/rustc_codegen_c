@@ -339,12 +339,11 @@ impl TestCase {
         let output_dir = self.output_file.parent().unwrap();
         std::fs::create_dir_all(output_dir).unwrap();
         let mut command = manifest.rustc();
-        command
-            .args(["--crate-type", "bin"])
-            .arg("-O")
-            .arg(&self.source)
-            .arg("-o")
-            .arg(&self.output_file);
+        command.args(["--crate-type", "bin"]);
+        if manifest.optimize {
+            command.arg("-O");
+        }
+        command.arg(&self.source).arg("-o").arg(&self.output_file);
         self.command_status("compile", &mut command);
     }
 
@@ -352,12 +351,11 @@ impl TestCase {
         let output_dir = self.output_file.parent().unwrap();
         std::fs::create_dir_all(output_dir).unwrap();
         let mut command = manifest.rustc();
-        command
-            .args(["--crate-type", "lib"])
-            .arg("-O")
-            .arg(&self.source)
-            .arg("--out-dir")
-            .arg(output_dir);
+        command.args(["--crate-type", "lib"]);
+        if manifest.optimize {
+            command.arg("-O");
+        }
+        command.arg(&self.source).arg("--out-dir").arg(output_dir);
         self.command_status("compile lib", &mut command);
     }
 

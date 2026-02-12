@@ -48,12 +48,11 @@ impl RustcCommand {
         for source in self.collect_aux_builds() {
             self.log_action_start("building auxiliary", source.display());
             let mut command = manifest.rustc();
-            command
-                .args(["--crate-type", "lib"])
-                .arg("-O")
-                .arg(&source)
-                .arg("--out-dir")
-                .arg(&manifest.out_dir);
+            command.args(["--crate-type", "lib"]);
+            if manifest.optimize {
+                command.arg("-O");
+            }
+            command.arg(&source).arg("--out-dir").arg(&manifest.out_dir);
             self.command_status("rustc", &mut command);
         }
     }
