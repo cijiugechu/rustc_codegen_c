@@ -237,7 +237,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "sub");
+        let ret = self.bb.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "-");
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn fsub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -253,7 +258,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "mul");
+        let ret = self.bb.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "*");
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn fmul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -269,7 +279,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn udiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "udiv");
+        if !matches!(ty, CTy::UInt(_)) {
+            panic!("unsupported type for udiv: {ty:?}");
+        }
+        let ret = self.bb.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn exactudiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -277,7 +295,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "sdiv");
+        if !matches!(ty, CTy::Int(_)) {
+            panic!("unsupported type for sdiv: {ty:?}");
+        }
+        let ret = self.bb.0.next_local_var();
+        let expr = self.mcx.binary(self.mcx.value(lhs), self.mcx.value(rhs), "/");
+        self.bb.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn exactsdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {

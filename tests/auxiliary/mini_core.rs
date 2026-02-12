@@ -20,6 +20,18 @@ pub trait Add<Rhs = Self> {
     fn add(self, rhs: Rhs) -> Self::Output;
 }
 
+#[lang = "sub"]
+pub trait Sub<Rhs = Self> {
+    type Output;
+    fn sub(self, rhs: Rhs) -> Self::Output;
+}
+
+#[lang = "mul"]
+pub trait Mul<Rhs = Self> {
+    type Output;
+    fn mul(self, rhs: Rhs) -> Self::Output;
+}
+
 impl Copy for bool {}
 impl Copy for u8 {}
 impl Copy for u16 {}
@@ -29,6 +41,7 @@ impl Copy for usize {}
 impl Copy for i8 {}
 impl Copy for i16 {}
 impl Copy for i32 {}
+impl Copy for i64 {}
 impl Copy for isize {}
 impl Copy for f32 {}
 impl Copy for f64 {}
@@ -52,6 +65,38 @@ macro_rules! impl_add_for_int {
 }
 
 impl_add_for_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
+macro_rules! impl_sub_for_int {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl Sub for $ty {
+                type Output = $ty;
+
+                fn sub(self, rhs: $ty) -> $ty {
+                    self - rhs
+                }
+            }
+        )*
+    };
+}
+
+impl_sub_for_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
+
+macro_rules! impl_mul_for_int {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl Mul for $ty {
+                type Output = $ty;
+
+                fn mul(self, rhs: $ty) -> $ty {
+                    self * rhs
+                }
+            }
+        )*
+    };
+}
+
+impl_mul_for_int!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
 pub mod libc {
     #[link(name = "c")]
