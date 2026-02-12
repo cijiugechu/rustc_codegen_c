@@ -5,6 +5,7 @@ use anstream::{eprint as print, eprintln as println};
 use clap::Args;
 use color_print::{cprint, cprintln};
 use glob::glob;
+use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use which::which;
 
@@ -44,37 +45,19 @@ impl Run for TestCommand {
         testcases.iter().for_each(|t| self.log_action_context(t.test.as_str(), t.name.as_str()));
 
         let filechecker = FileChecker::new(self.verbose);
-        for testcase in testcases {
-            match testcase.test {
-                TestType::FileCheck => {
-                    self.log_action_start("TEST file checking", &testcase.name);
-                    self.log_action_context("source", &testcase.source.display());
-                    self.log_action_context("output", &testcase.output_file.display());
-                    testcase.build(manifest);
-                    filechecker.check_testcase(&testcase);
-                }
-                TestType::Bless => {
-                    self.log_action_start("TEST Bless", &testcase.name);
-                    self.log_action_context("source", &testcase.source.display());
-                    self.log_action_context("output", &testcase.output_file.display());
-                    testcase.build(manifest);
-                    self.bless(self.bless, &testcase);
-                }
-                TestType::Compile => {
-                    self.log_action_start("TEST Compile", &testcase.name);
-                    self.log_action_context("source", &testcase.source.display());
-                    self.log_action_context("output", &testcase.output_file.display());
-                    testcase.build(manifest);
-                }
-                TestType::CompileLib => {
-                    self.log_action_start("TEST CompileLib", &testcase.name);
-                    self.log_action_context("source", &testcase.source.display());
-                    self.log_action_context("output", &testcase.output_file.display());
-                    testcase.build_lib(manifest);
-                }
-            }
+
+        let (filecheck_cases, other_cases): (Vec<_>, Vec<_>) =
+            testcases.into_iter().partition(|case| matches!(case.test, TestType::FileCheck));
+
+        for testcase in other_cases {
+            self.run_non_filecheck_case(manifest, &testcase);
             self.check_and_run_directives(&testcase);
         }
+
+        filecheck_cases.into_par_iter().for_each(|testcase| {
+            self.run_filecheck_case(manifest, &filechecker, &testcase);
+            self.check_and_run_directives(&testcase);
+        });
     }
 
     fn verbose(&self) -> bool {
@@ -83,6 +66,44 @@ impl Run for TestCommand {
 }
 
 impl TestCommand {
+    fn run_filecheck_case(
+        &self,
+        manifest: &Manifest,
+        filechecker: &FileChecker,
+        testcase: &TestCase,
+    ) {
+        self.log_action_start("TEST file checking", &testcase.name);
+        self.log_action_context("source", &testcase.source.display());
+        self.log_action_context("output", &testcase.output_file.display());
+        testcase.build(manifest);
+        filechecker.check_testcase(testcase);
+    }
+
+    fn run_non_filecheck_case(&self, manifest: &Manifest, testcase: &TestCase) {
+        match testcase.test {
+            TestType::Bless => {
+                self.log_action_start("TEST Bless", &testcase.name);
+                self.log_action_context("source", &testcase.source.display());
+                self.log_action_context("output", &testcase.output_file.display());
+                testcase.build(manifest);
+                self.bless(self.bless, testcase);
+            }
+            TestType::Compile => {
+                self.log_action_start("TEST Compile", &testcase.name);
+                self.log_action_context("source", &testcase.source.display());
+                self.log_action_context("output", &testcase.output_file.display());
+                testcase.build(manifest);
+            }
+            TestType::CompileLib => {
+                self.log_action_start("TEST CompileLib", &testcase.name);
+                self.log_action_context("source", &testcase.source.display());
+                self.log_action_context("output", &testcase.output_file.display());
+                testcase.build_lib(manifest);
+            }
+            TestType::FileCheck => unreachable!("filecheck cases are handled in parallel"),
+        }
+    }
+
     pub fn collect_testcases(&self, manifest: &Manifest) -> Vec<TestCase> {
         let mut cases = vec![];
         let verbose = self.verbose;
