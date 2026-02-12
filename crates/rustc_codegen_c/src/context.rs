@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::hash::{Hash, Hasher};
 
 use rustc_abi::{HasDataLayout, TargetDataLayout};
-use rustc_codegen_c_ast::expr::CValue;
+use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::func::CFunc;
 use rustc_codegen_c_ast::ty::CTy;
 use rustc_codegen_c_ast::ModuleCtx;
@@ -37,6 +37,12 @@ pub struct CBasicBlock<'mx> {
     pub label: &'mx str,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PendingAlloca {
+    pub bytes: usize,
+    pub declared: bool,
+}
+
 impl PartialEq for CBasicBlock<'_> {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.func.0, other.func.0) && self.label == other.label
@@ -62,6 +68,14 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
+    /// Per-function value type cache shared across basic blocks.
+    pub value_tys: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
+    /// Per-function pointer pointee metadata.
+    pub ptr_pointees: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
+    /// Per-function pointer lvalue expressions from GEP-like projections.
+    pub ptr_lvalues: RefCell<FxHashMap<(usize, CValue<'mx>), CExpr<'mx>>>,
+    /// Per-function pending stack allocas to be materialized as declarations.
+    pub pending_allocas: RefCell<FxHashMap<(usize, CValue<'mx>), PendingAlloca>>,
     /// Mapping from Rust ADT definitions to C struct types.
     pub struct_types: RefCell<FxHashMap<DefId, CTy<'mx>>>,
     /// Mapping from C struct types to field metadata.
@@ -77,6 +91,10 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             tcx,
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
+            value_tys: RefCell::new(FxHashMap::default()),
+            ptr_pointees: RefCell::new(FxHashMap::default()),
+            ptr_lvalues: RefCell::new(FxHashMap::default()),
+            pending_allocas: RefCell::new(FxHashMap::default()),
             struct_types: RefCell::new(FxHashMap::default()),
             struct_fields: RefCell::new(FxHashMap::default()),
         };

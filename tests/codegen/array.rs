@@ -11,7 +11,8 @@
 extern crate mini_core;
 
 // CHECK-LABEL: main
-// CHECK: uint8_t _{{[0-9]+}}[12];
+// CHECK: int32_t _{{[0-9]+}}[3];
+// CHECK: uint8_t _{{[0-9]+}}[4];
 // CHECK: return 0;
 #[no_mangle]
 pub fn main() -> i32 {

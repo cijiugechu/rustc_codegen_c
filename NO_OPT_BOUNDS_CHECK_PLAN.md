@@ -161,3 +161,52 @@ Actions:
 - Full Rust layout fidelity for all types.
 - Complete panic/unwind ecosystem beyond what is needed for bounds-check path.
 - Full intrinsic coverage unrelated to array-index asserts.
+
+## Array typing follow-up
+
+The no-opt bounds-check pipeline is complete, but generated C still uses byte-buffer style
+stack slots for arrays (for example `uint8_t buf[N]` with casts) instead of typed array
+declarations/usages. The follow-up migration is tracked here.
+
+### Phase 1: Introduce pointer/place metadata in builder [Done]
+
+Actions:
+- Add pointer metadata table in `Builder` to track inferred pointee type.
+- Record metadata on `alloca` and derived pointers from `gep`.
+- Use metadata in `store` before falling back to align-based guessing.
+
+Status:
+- Implemented in `crates/rustc_codegen_c/src/builder.rs`.
+
+### Phase 2: Type-driven GEP projection [Done]
+
+Actions:
+- Allow non-constant array/pointer indices in `gep`.
+- Keep struct field indexing constant-only.
+- Continue to update pointer metadata for projected pointers.
+
+Status:
+- Implemented for dynamic array/pointer indices.
+- Struct field indexing remains constant-only by design.
+
+### Phase 3: Typed stack-slot declarations [Done]
+
+Actions:
+- Replace raw byte-array declaration strategy for `alloca` with deferred typed slot materialization.
+- Ensure emitted C locals use concrete aggregate element types (`int32_t arr[3]`, etc.).
+
+Status:
+- Deferred alloca declaration is implemented.
+- Array declarations in indexed and non-indexed paths now emit typed locals (`int32_t _0[3]`, etc.).
+- GEP-derived load/store now uses direct array lvalues where possible (`_0[i]` reads/writes).
+
+### Phase 4: Remove remaining type-guess fallbacks [In Progress]
+
+Actions:
+- Remove align-based store-type fallback once typed place propagation is complete.
+- Verify no `size_t` accidental widening in integer array write paths.
+
+Status:
+- `store` prefers propagated type info (value/pointee/pending-allocation) and only then uses align fallback.
+- Added per-function shared value type cache across basic blocks to reduce type loss at branch joins.
+- Added variable-index no-opt regression coverage in `tests/codegen/array_index_var.rs`.

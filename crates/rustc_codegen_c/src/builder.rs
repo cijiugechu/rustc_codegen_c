@@ -8,6 +8,7 @@ use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, ConstCodegenMethods};
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
+use rustc_hir::LangItem;
 use rustc_middle::ty;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, HasTypingEnv, LayoutError,
@@ -17,7 +18,7 @@ use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 
-use crate::context::{CBasicBlock, CodegenCx};
+use crate::context::{CBasicBlock, CodegenCx, PendingAlloca};
 
 mod abi;
 mod asm;
@@ -103,16 +104,25 @@ impl<'tcx, 'mx> FnAbiOfHelpers<'tcx> for Builder<'_, 'tcx, 'mx> {
 }
 
 impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
+    fn fkey(&self) -> usize {
+        self.bb.func.0 as *const _ as usize
+    }
+
     fn record_value_ty(&mut self, value: CValue<'mx>, ty: CTy<'mx>) {
         if !matches!(value, CValue::Scalar(_)) {
             self.value_tys.insert(value, ty);
+            self.cx.value_tys.borrow_mut().insert((self.fkey(), value), ty);
         }
     }
 
     fn value_ty(&self, value: CValue<'mx>) -> Option<CTy<'mx>> {
         match value {
             CValue::Scalar(_) => None,
-            _ => self.value_tys.get(&value).copied(),
+            _ => self
+                .value_tys
+                .get(&value)
+                .copied()
+                .or_else(|| self.cx.value_tys.borrow().get(&(self.fkey(), value)).copied()),
         }
     }
 
@@ -122,7 +132,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             (Some(lhs), Some(rhs)) => panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}"),
             (Some(lhs), None) => lhs,
             (None, Some(rhs)) => rhs,
-            (None, None) => CTy::UInt(CUintTy::Usize),
+            (None, None) => panic!("cannot infer operand type for {op}"),
         };
 
         match ty {
@@ -131,18 +141,131 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         }
     }
 
-    fn require_const_usize(&self, value: CValue<'mx>, op: &str) -> usize {
-        match self.cx.const_to_opt_uint(value) {
-            Some(i) => i as usize,
-            None => panic!("{op} only supports constant unsigned indices"),
-        }
-    }
-
     fn pointer_to(&self, pointee: CTy<'mx>) -> CTy<'mx> {
         CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
     }
 
-    fn store_ty_from_align(&self, align: rustc_abi::Align) -> CTy<'mx> {
+    fn pointer_pointee_ty(&self, ptr: CValue<'mx>) -> Option<CTy<'mx>> {
+        let fkey = self.bb.func.0 as *const _ as usize;
+        if let Some(pointee) = self.cx.ptr_pointees.borrow().get(&(fkey, ptr)).copied() {
+            return Some(pointee);
+        }
+
+        self.value_ty(ptr).and_then(|ty| match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(elem) | CTyKind::Array(elem, _) => Some(*elem),
+                CTyKind::Struct(_) => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn update_ptr_pointee_ty(&mut self, ptr: CValue<'mx>, pointee: CTy<'mx>) {
+        let fkey = self.bb.func.0 as *const _ as usize;
+        self.cx.ptr_pointees.borrow_mut().insert((fkey, ptr), pointee);
+    }
+
+    fn pointer_lvalue(&self, ptr: CValue<'mx>) -> Option<rustc_codegen_c_ast::expr::CExpr<'mx>> {
+        self.cx.ptr_lvalues.borrow().get(&(self.fkey(), ptr)).copied()
+    }
+
+    fn update_ptr_lvalue(
+        &mut self,
+        ptr: CValue<'mx>,
+        lvalue: rustc_codegen_c_ast::expr::CExpr<'mx>,
+    ) {
+        self.cx.ptr_lvalues.borrow_mut().insert((self.fkey(), ptr), lvalue);
+    }
+
+    fn ensure_alloca_decl(&mut self, ptr: CValue<'mx>, suggested_ty: Option<CTy<'mx>>) {
+        let fkey = self.bb.func.0 as *const _ as usize;
+        let Some(slot) = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied() else {
+            return;
+        };
+        if slot.declared {
+            return;
+        }
+
+        let decl_ty = match suggested_ty {
+            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _) | CTyKind::Struct(_)) => {
+                CTy::Ref(kind)
+            }
+            Some(other) => self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
+                panic!("unsupported alloca declaration type suggestion: {other:?}")
+            }),
+            None => panic!("cannot infer alloca declaration type for {ptr:?}"),
+        };
+
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ptr, decl_ty, None)));
+        self.record_value_ty(ptr, decl_ty);
+        if let CTy::Ref(kind) = decl_ty {
+            match kind.0 {
+                CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
+                    self.update_ptr_pointee_ty(ptr, *elem)
+                }
+                CTyKind::Struct(_) => {}
+            }
+        }
+
+        self.cx
+            .pending_allocas
+            .borrow_mut()
+            .insert((fkey, ptr), PendingAlloca { declared: true, ..slot });
+    }
+
+    fn pending_alloca_bytes(&self, ptr: CValue<'mx>) -> Option<usize> {
+        let fkey = self.bb.func.0 as *const _ as usize;
+        self.cx.pending_allocas.borrow().get(&(fkey, ptr)).map(|slot| slot.bytes)
+    }
+
+    fn c_ty_size_bytes(&self, ty: CTy<'mx>) -> Option<usize> {
+        match ty {
+            CTy::Bool => Some(1),
+            CTy::Int(int) => Some(match int {
+                rustc_codegen_c_ast::ty::CIntTy::I8 => 1,
+                rustc_codegen_c_ast::ty::CIntTy::I16 => 2,
+                rustc_codegen_c_ast::ty::CIntTy::I32 => 4,
+                rustc_codegen_c_ast::ty::CIntTy::I64 => 8,
+                rustc_codegen_c_ast::ty::CIntTy::Isize => {
+                    self.tcx.data_layout.pointer_size().bytes() as usize
+                }
+            }),
+            CTy::UInt(int) => Some(match int {
+                CUintTy::U8 => 1,
+                CUintTy::U16 => 2,
+                CUintTy::U32 => 4,
+                CUintTy::U64 => 8,
+                CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
+            }),
+            _ => None,
+        }
+    }
+
+    fn infer_store_ty_from_pending_alloca(
+        &self,
+        ptr: CValue<'mx>,
+        align: rustc_abi::Align,
+    ) -> Option<CTy<'mx>> {
+        let fkey = self.fkey();
+        let slot = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied()?;
+        let size = slot.bytes;
+        if size != 1 && size != 2 && size != 4 && size != 8 {
+            return None;
+        }
+        if align.bytes() as usize != size {
+            return None;
+        }
+
+        Some(match size {
+            1 => CTy::UInt(CUintTy::U8),
+            2 => CTy::UInt(CUintTy::U16),
+            4 => CTy::UInt(CUintTy::U32),
+            8 => CTy::UInt(CUintTy::U64),
+            _ => return None,
+        })
+    }
+
+    fn fallback_store_ty_from_align(&self, align: rustc_abi::Align) -> CTy<'mx> {
         match align.bytes() {
             1 => CTy::UInt(CUintTy::U8),
             2 => CTy::UInt(CUintTy::U16),
@@ -150,6 +273,16 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             8 => CTy::UInt(CUintTy::U64),
             _ => CTy::UInt(CUintTy::U8),
         }
+    }
+
+    fn array_decl_ty_from_bytes(&self, bytes: usize, elem_ty: CTy<'mx>) -> Option<CTy<'mx>> {
+        let elem_bytes = self.c_ty_size_bytes(elem_ty)?;
+        if elem_bytes == 0 || bytes % elem_bytes != 0 {
+            return None;
+        }
+        Some(CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Array(elem_ty, bytes / elem_bytes)),
+        )))
     }
 }
 
@@ -451,17 +584,25 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn alloca(&mut self, size: rustc_abi::Size, align: rustc_abi::Align) -> Self::Value {
         let ret = self.bb.func.0.next_local_var();
         let bytes = size.bytes_usize();
-        let ty = CTy::Ref(Interned::new_unchecked(
-            self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes)),
-        ));
-        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, None)));
-        self.record_value_ty(ret, ty);
+        let fkey = self.bb.func.0 as *const _ as usize;
+        self.cx
+            .pending_allocas
+            .borrow_mut()
+            .insert((fkey, ret), PendingAlloca { bytes, declared: false });
         ret
     }
 
     fn load(&mut self, ty: Self::Type, ptr: Self::Value, align: rustc_abi::Align) -> Self::Value {
-        let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));
-        let expr = self.mcx.unary("*", cast_ptr);
+        self.ensure_alloca_decl(ptr, Some(ty));
+        let expr = if let Some(lvalue) = self.pointer_lvalue(ptr) {
+            match self.pointer_pointee_ty(ptr) {
+                Some(pointee) if pointee == ty => lvalue,
+                _ => self.mcx.cast(ty, lvalue),
+            }
+        } else {
+            let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));
+            self.mcx.unary("*", cast_ptr)
+        };
 
         let ret = self.bb.func.0.next_local_var();
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
@@ -529,17 +670,22 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     ) -> Self::Value {
         let store_ty = self
             .value_ty(val)
-            .or_else(|| match self.value_ty(ptr) {
-                Some(CTy::Ref(kind)) => match kind.0 {
-                    CTyKind::Pointer(elem) => Some(*elem),
-                    _ => None,
-                },
-                _ => None,
-            })
-            .unwrap_or_else(|| self.store_ty_from_align(align));
-        let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
-        let lhs = self.mcx.unary("*", cast_ptr);
-        let assign = self.mcx.binary(lhs, self.mcx.value(val), "=");
+            .or_else(|| self.pointer_pointee_ty(ptr))
+            .or_else(|| self.infer_store_ty_from_pending_alloca(ptr, align))
+            .unwrap_or_else(|| self.fallback_store_ty_from_align(align));
+        self.ensure_alloca_decl(ptr, Some(store_ty));
+        let lhs = if let Some(lvalue) = self.pointer_lvalue(ptr) {
+            lvalue
+        } else {
+            let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
+            self.mcx.unary("*", cast_ptr)
+        };
+        let rhs = match self.value_ty(val) {
+            Some(val_ty) if val_ty == store_ty => self.mcx.value(val),
+            Some(_) => self.mcx.cast(store_ty, self.mcx.value(val)),
+            None => self.mcx.value(val),
+        };
+        let assign = self.mcx.binary(lhs, rhs, "=");
         self.bb.func.0.push_stmt(self.mcx.expr_stmt(assign));
         val
     }
@@ -570,9 +716,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let mut projected = false;
 
         for (i, index) in indices.iter().enumerate() {
-            let index = self.require_const_usize(*index, "gep");
+            let const_index = self.cx.const_to_opt_uint(*index).map(|v| v as usize);
 
-            if i == 0 && index == 0 {
+            if i == 0 && const_index == Some(0) && indices.len() > 1 {
                 continue;
             }
             projected = true;
@@ -580,14 +726,27 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             projected_ty = match projected_ty {
                 CTy::Ref(kind) => match kind.0 {
                     CTyKind::Array(elem, _) => {
-                        expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                        let idx_expr = if let Some(index) = const_index {
+                            self.mcx.value(CValue::Scalar(index as i128))
+                        } else {
+                            self.mcx.value(*index)
+                        };
+                        expr = self.mcx.index(expr, idx_expr);
                         *elem
                     }
                     CTyKind::Pointer(elem) => {
-                        expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                        let idx_expr = if let Some(index) = const_index {
+                            self.mcx.value(CValue::Scalar(index as i128))
+                        } else {
+                            self.mcx.value(*index)
+                        };
+                        expr = self.mcx.index(expr, idx_expr);
                         *elem
                     }
                     CTyKind::Struct(_) => {
+                        let index = const_index.unwrap_or_else(|| {
+                            panic!("gep on struct fields requires constant index")
+                        });
                         let fields = self
                             .cx
                             .struct_fields
@@ -610,21 +769,42 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     }
                 },
                 _ => {
-                    expr = self.mcx.index(expr, self.mcx.value(CValue::Scalar(index as i128)));
+                    let idx_expr = if let Some(index) = const_index {
+                        self.mcx.value(CValue::Scalar(index as i128))
+                    } else {
+                        self.mcx.value(*index)
+                    };
+                    expr = self.mcx.index(expr, idx_expr);
                     projected_ty
                 }
             };
         }
 
         if !projected {
+            self.ensure_alloca_decl(ptr, Some(ty));
             return ptr;
         }
+
+        let inferred_decl_ty = self.pending_alloca_bytes(ptr).and_then(|bytes| {
+            self.c_ty_size_bytes(projected_ty).and_then(|elem_bytes| {
+                if elem_bytes == 0 || bytes % elem_bytes != 0 {
+                    return None;
+                }
+                let len = bytes / elem_bytes;
+                Some(CTy::Ref(Interned::new_unchecked(
+                    self.mcx.arena().alloc(CTyKind::Array(projected_ty, len)),
+                )))
+            })
+        });
+        self.ensure_alloca_decl(ptr, inferred_decl_ty.or(Some(ty)));
 
         let ret = self.bb.func.0.next_local_var();
         let ret_ty = self.pointer_to(projected_ty);
         let addr = self.mcx.unary("&", expr);
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(addr))));
         self.record_value_ty(ret, ret_ty);
+        self.update_ptr_pointee_ty(ret, projected_ty);
+        self.update_ptr_lvalue(ret, expr);
         ret
     }
 
@@ -921,12 +1101,13 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
         let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
         let mut callee = llfn;
-        if let CValue::Func(name) = llfn {
-            if name.contains("panic_bounds_check") {
-                callee = CValue::Func("__rust_panic_bounds_check");
-                if args.len() > 2 {
-                    args.truncate(2);
-                }
+        if instance
+            .and_then(|inst| self.tcx.lang_items().from_def_id(inst.def_id()))
+            .is_some_and(|item| item == LangItem::PanicBoundsCheck)
+        {
+            callee = CValue::Func("__rust_panic_bounds_check");
+            if args.len() > 2 {
+                args.truncate(2);
             }
         }
 
