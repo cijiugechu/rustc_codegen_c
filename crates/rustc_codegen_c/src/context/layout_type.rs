@@ -159,7 +159,9 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 (Integer::I64, false) => CTy::UInt(CUintTy::U64),
                 (Integer::I128, _) => todo!(),
             },
-            Primitive::Pointer(_) => CTy::UInt(CUintTy::Usize),
+            Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+            )),
             Primitive::Float(_) => todo!(),
         }
     }

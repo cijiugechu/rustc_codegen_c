@@ -1,8 +1,83 @@
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_ssa::traits::ConstCodegenMethods;
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
+use rustc_middle::mir::interpret::GlobalAlloc;
+use rustc_middle::ty::Instance;
 
 use crate::context::CodegenCx;
+
+fn is_valid_c_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn sanitize_symbol_name(symbol_name: &str) -> String {
+    if is_valid_c_identifier(symbol_name) {
+        return symbol_name.to_string();
+    }
+
+    let mut out = String::from("__rcgenc_");
+    for byte in symbol_name.bytes() {
+        if byte.is_ascii_alphanumeric() {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(&mut out, "_{byte:02X}");
+        }
+    }
+    out
+}
+
+fn c_string_literal_from_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(bytes.len() + 2);
+    out.push('"');
+    for &byte in bytes {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(&mut out, "\\{:03o}", byte);
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn value_expr_text(value: CValue<'_>) -> String {
+    match value {
+        CValue::Scalar(v) => v.to_string(),
+        CValue::Local(i) => format!("_{i}"),
+        CValue::Func(name) => name.to_string(),
+    }
+}
+
+impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
+    fn const_bytes_pointer(&self, bytes: &[u8]) -> CValue<'mx> {
+        let literal = c_string_literal_from_bytes(bytes);
+        let expr = self.mcx.alloc_str(&format!("((uint8_t *){literal})"));
+        CValue::Func(expr)
+    }
+
+    fn symbol_value(&self, symbol_name: &str) -> CValue<'mx> {
+        let symbol_name = sanitize_symbol_name(symbol_name);
+        CValue::Func(self.mcx.alloc_str(&symbol_name))
+    }
+}
 
 impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     fn const_null(&self, t: Self::Type) -> Self::Value {
@@ -70,7 +145,7 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn const_str(&self, s: &str) -> (Self::Value, Self::Value) {
-        todo!()
+        (self.const_bytes_pointer(s.as_bytes()), CValue::Scalar(s.len() as i128))
     }
 
     fn const_struct(&self, elts: &[Self::Value], packed: bool) -> Self::Value {
@@ -92,7 +167,9 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn const_data_from_alloc(&self, alloc: ConstAllocation<'_>) -> Self::Value {
-        todo!()
+        let alloc = alloc.inner();
+        let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len());
+        self.const_bytes_pointer(bytes)
     }
 
     fn scalar_to_backend(
@@ -103,16 +180,37 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     ) -> Self::Value {
         match cv {
             Scalar::Int(scalar) => CValue::Scalar(scalar.to_int(scalar.size())),
-            // This backend does not materialize real constant addresses yet.
-            // For panic location and similar metadata paths, a null pointer is sufficient.
-            Scalar::Ptr(_, _) => CValue::Scalar(0),
+            Scalar::Ptr(ptr, _) => {
+                let (prov, offset) = ptr.prov_and_relative_offset();
+                let base = match self.tcx.global_alloc(prov.alloc_id()) {
+                    GlobalAlloc::Memory(alloc) => self.const_data_from_alloc(alloc),
+                    GlobalAlloc::Function { instance, .. } => {
+                        self.symbol_value(self.tcx.symbol_name(instance).name)
+                    }
+                    GlobalAlloc::Static(def_id) => {
+                        let instance = Instance::mono(self.tcx, def_id);
+                        self.symbol_value(self.tcx.symbol_name(instance).name)
+                    }
+                    GlobalAlloc::VTable(..) | GlobalAlloc::TypeId { .. } => CValue::Scalar(0),
+                };
+                self.const_ptr_byte_offset(base, offset)
+            }
         }
     }
 
     fn const_ptr_byte_offset(&self, val: Self::Value, offset: rustc_abi::Size) -> Self::Value {
+        if offset.bytes() == 0 {
+            return val;
+        }
+
         match val {
             CValue::Scalar(v) => CValue::Scalar(v + offset.bytes() as i128),
-            _ => val,
+            other => {
+                let base = value_expr_text(other);
+                let expr =
+                    self.mcx.alloc_str(&format!("((uint8_t *)({base}) + {})", offset.bytes()));
+                CValue::Func(expr)
+            }
         }
     }
     fn const_vector(&self, _: &[Self::Value]) -> Self::Value {

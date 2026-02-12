@@ -2,7 +2,7 @@
 
 use std::ops::Deref;
 
-use rustc_abi::{HasDataLayout, TargetDataLayout};
+use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, ConstCodegenMethods};
@@ -124,6 +124,14 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 .copied()
                 .or_else(|| self.cx.value_tys.borrow().get(&(self.fkey(), value)).copied()),
         }
+    }
+
+    fn packed_pair_values(&self, value: CValue<'mx>) -> Option<(CValue<'mx>, CValue<'mx>)> {
+        self.cx.packed_scalar_pairs.borrow().get(&(self.fkey(), value)).copied()
+    }
+
+    fn set_packed_pair_values(&mut self, pair: CValue<'mx>, a: CValue<'mx>, b: CValue<'mx>) {
+        self.cx.packed_scalar_pairs.borrow_mut().insert((self.fkey(), pair), (a, b));
     }
 
     fn infer_integer_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
@@ -657,6 +665,23 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             return OperandRef { val: OperandValue::Immediate(val), layout };
         }
 
+        if self.cx.is_backend_scalar_pair(layout) {
+            let (a_scalar, b_scalar) = match layout.backend_repr {
+                BackendRepr::ScalarPair(a, b) => (a, b),
+                _ => unreachable!("expected scalar pair layout"),
+            };
+            let b_offset = a_scalar.size(self).align_to(b_scalar.align(self).abi);
+
+            let a_ty = self.cx.scalar_pair_element_backend_type(layout, 0, true);
+            let b_ty = self.cx.scalar_pair_element_backend_type(layout, 1, true);
+            let a = self.load(a_ty, place.val.llval, place.val.align);
+            let b_ptr = self.inbounds_ptradd(place.val.llval, self.const_usize(b_offset.bytes()));
+            let b_align = place.val.align.restrict_for_offset(b_offset);
+            let b = self.load(b_ty, b_ptr, b_align);
+
+            return OperandRef { val: OperandValue::Pair(a, b), layout };
+        }
+
         OperandRef { val: OperandValue::Ref(place.val), layout }
     }
 
@@ -1035,11 +1060,31 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn extract_value(&mut self, agg_val: Self::Value, idx: u64) -> Self::Value {
-        todo!()
+        let (a, b) = self
+            .packed_pair_values(agg_val)
+            .unwrap_or_else(|| panic!("extract_value on non-pair aggregate: {agg_val:?}"));
+        match idx {
+            0 => a,
+            1 => b,
+            _ => panic!("invalid scalar-pair extract index {idx}"),
+        }
     }
 
     fn insert_value(&mut self, agg_val: Self::Value, elt: Self::Value, idx: u64) -> Self::Value {
-        todo!()
+        let (mut a, mut b) = self.packed_pair_values(agg_val).unwrap_or((agg_val, agg_val));
+        match idx {
+            0 => a = elt,
+            1 => b = elt,
+            _ => panic!("invalid scalar-pair insert index {idx}"),
+        }
+
+        let pair_val = if self.packed_pair_values(agg_val).is_some() {
+            agg_val
+        } else {
+            self.bb.func.0.next_local_var()
+        };
+        self.set_packed_pair_values(pair_val, a, b);
+        pair_val
     }
 
     fn set_personality_fn(&mut self, personality: Self::Function) {

@@ -88,6 +88,8 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
     /// Per-function value type cache shared across basic blocks.
     pub value_tys: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
+    /// Per-function virtual packed scalar pairs used by extract/insert helpers.
+    pub packed_scalar_pairs: RefCell<FxHashMap<(usize, CValue<'mx>), (CValue<'mx>, CValue<'mx>)>>,
     /// Per-function pointer pointee metadata.
     pub ptr_pointees: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
     /// Per-function pointer lvalue expressions from GEP-like projections.
@@ -115,6 +117,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
             value_tys: RefCell::new(FxHashMap::default()),
+            packed_scalar_pairs: RefCell::new(FxHashMap::default()),
             ptr_pointees: RefCell::new(FxHashMap::default()),
             ptr_lvalues: RefCell::new(FxHashMap::default()),
             pending_allocas: RefCell::new(FxHashMap::default()),
