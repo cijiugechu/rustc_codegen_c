@@ -15,7 +15,8 @@ use rustc_hash::FxHashMap;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
 use rustc_middle::ty::layout::{
-    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOfHelpers, TyAndLayout,
+    FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOf, LayoutOfHelpers,
+    TyAndLayout,
 };
 use rustc_middle::ty::{Instance, Ty, TyCtxt};
 use rustc_target::callconv::FnAbi;
@@ -41,6 +42,23 @@ pub struct CBasicBlock<'mx> {
 pub struct PendingAlloca {
     pub bytes: usize,
     pub declared: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdtFieldLayout<'mx> {
+    pub index: usize,
+    pub name: &'mx str,
+    pub ty: CTy<'mx>,
+    pub offset: usize,
+    pub size: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdtLayoutInfo<'mx> {
+    pub size: usize,
+    pub align: usize,
+    pub repr_c: bool,
+    pub fields: Vec<AdtFieldLayout<'mx>>,
 }
 
 impl PartialEq for CBasicBlock<'_> {
@@ -76,10 +94,14 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub ptr_lvalues: RefCell<FxHashMap<(usize, CValue<'mx>), CExpr<'mx>>>,
     /// Per-function pending stack allocas to be materialized as declarations.
     pub pending_allocas: RefCell<FxHashMap<(usize, CValue<'mx>), PendingAlloca>>,
-    /// Mapping from Rust ADT definitions to C struct types.
+    /// Mapping from Rust ADT definitions to C struct marker types.
     pub struct_types: RefCell<FxHashMap<DefId, CTy<'mx>>>,
-    /// Mapping from C struct types to field metadata.
-    pub struct_fields: RefCell<FxHashMap<CTy<'mx>, Vec<(&'mx str, CTy<'mx>)>>>,
+    /// Mapping from monomorphized ADT type to C struct marker types.
+    pub adt_types: RefCell<FxHashMap<Ty<'tcx>, CTy<'mx>>>,
+    /// Mapping from monomorphized ADT type to computed layout metadata.
+    pub adt_layouts: RefCell<FxHashMap<Ty<'tcx>, AdtLayoutInfo<'mx>>>,
+    /// Mapping from C struct marker type to computed layout metadata.
+    pub struct_layouts: RefCell<FxHashMap<CTy<'mx>, AdtLayoutInfo<'mx>>>,
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
@@ -96,7 +118,9 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             ptr_lvalues: RefCell::new(FxHashMap::default()),
             pending_allocas: RefCell::new(FxHashMap::default()),
             struct_types: RefCell::new(FxHashMap::default()),
-            struct_fields: RefCell::new(FxHashMap::default()),
+            adt_types: RefCell::new(FxHashMap::default()),
+            adt_layouts: RefCell::new(FxHashMap::default()),
+            struct_layouts: RefCell::new(FxHashMap::default()),
         };
         cx.predeclare_repr_c_structs();
         cx
@@ -122,12 +146,15 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 let field_ty = field.ty(self.tcx, args);
                 matches!(
                     field_ty.kind(),
-                    rustc_type_ir::TyKind::Int(_) | rustc_type_ir::TyKind::Uint(_)
+                    rustc_type_ir::TyKind::Bool
+                        | rustc_type_ir::TyKind::Int(_)
+                        | rustc_type_ir::TyKind::Uint(_)
                 )
             });
 
             if all_primitive_ints {
-                self.define_repr_c_primitive_struct(*adt_def, args);
+                let layout = self.layout_of(ty);
+                self.define_simple_struct_layout(layout, *adt_def, args);
             }
         }
     }

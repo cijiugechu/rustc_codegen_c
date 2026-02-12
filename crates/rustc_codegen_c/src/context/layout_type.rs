@@ -8,23 +8,21 @@ use rustc_middle::ty::Ty;
 use rustc_target::callconv::FnAbi;
 use rustc_type_ir::TyKind;
 
-use crate::context::CodegenCx;
+use crate::context::{AdtFieldLayout, AdtLayoutInfo, CodegenCx};
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
-    pub(crate) fn define_repr_c_primitive_struct(
+    pub(crate) fn define_simple_struct_layout(
         &self,
+        layout: TyAndLayout<'tcx>,
         adt_def: rustc_middle::ty::AdtDef<'tcx>,
         args: rustc_middle::ty::GenericArgsRef<'tcx>,
     ) -> CTy<'mx> {
-        if let Some(ty) = self.struct_types.borrow().get(&adt_def.did()).copied() {
+        if let Some(ty) = self.adt_types.borrow().get(&layout.ty).copied() {
             return ty;
         }
 
         if !adt_def.is_struct() {
-            panic!("only repr(C) structs are supported, got {}", adt_def.descr());
-        }
-        if !adt_def.repr().c() {
-            panic!("only repr(C) structs are supported");
+            panic!("only struct ADTs are supported, got {}", adt_def.descr());
         }
 
         let name = self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str());
@@ -32,24 +30,45 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let variant = adt_def.non_enum_variant();
         let mut fields = Vec::with_capacity(variant.fields.len());
-        for field in variant.fields.iter() {
+        for (i, field) in variant.fields.iter().enumerate() {
             let field_name = self.mcx.alloc_str(field.name.as_str());
             let field_ty = field.ty(self.tcx, args);
-            let field_layout = self.layout_of(field_ty);
+            let field_layout = layout.field(&*self, i);
             let field_cty = self.immediate_backend_type(field_layout);
             match field_cty {
-                CTy::Int(_) | CTy::UInt(_) => {}
-                _ => panic!("only primitive integer fields are supported in repr(C) structs"),
+                CTy::Bool | CTy::Int(_) | CTy::UInt(_) => {}
+                _ => panic!("only primitive scalar fields are supported in simple struct mode"),
             }
-            fields.push((field_name, field_cty));
+            if matches!(field_ty.kind(), TyKind::Adt(..)) {
+                panic!("nested struct fields are not supported yet");
+            }
+            fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: field_cty,
+                offset: layout.fields.offset(i).bytes_usize(),
+                size: field_layout.size.bytes_usize(),
+            });
         }
 
-        self.struct_types.borrow_mut().insert(adt_def.did(), cty);
-        self.struct_fields.borrow_mut().insert(cty, fields.clone());
-        self.mcx.module().push_struct(CStructDef {
-            name,
-            fields: fields.iter().map(|(name, ty)| CStructField { name, ty: *ty }).collect(),
-        });
+        let layout_info = AdtLayoutInfo {
+            size: layout.size.bytes_usize(),
+            align: layout.align.abi.bytes() as usize,
+            repr_c: adt_def.repr().c(),
+            fields: fields.clone(),
+        };
+
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
+        self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
+        self.struct_layouts.borrow_mut().insert(cty, layout_info.clone());
+
+        if layout_info.repr_c {
+            self.struct_types.borrow_mut().insert(adt_def.did(), cty);
+            self.mcx.module().push_struct(CStructDef {
+                name,
+                fields: fields.iter().map(|f| CStructField { name: f.name, ty: f.ty }).collect(),
+            });
+        }
 
         cty
     }
@@ -66,7 +85,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 let array = self.mcx.arena().alloc(CTyKind::Array(elem, layout.fields.count()));
                 CTy::Ref(Interned::new_unchecked(array))
             }
-            TyKind::Adt(adt_def, args) => self.define_repr_c_primitive_struct(*adt_def, args),
+            TyKind::Adt(adt_def, args) => self.define_simple_struct_layout(layout, *adt_def, args),
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
     }

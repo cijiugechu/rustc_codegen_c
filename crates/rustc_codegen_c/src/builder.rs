@@ -177,6 +177,10 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.cx.ptr_lvalues.borrow_mut().insert((self.fkey(), ptr), lvalue);
     }
 
+    fn struct_layout_info(&self, ty: CTy<'mx>) -> Option<crate::context::AdtLayoutInfo<'mx>> {
+        self.cx.struct_layouts.borrow().get(&ty).cloned()
+    }
+
     fn ensure_alloca_decl(&mut self, ptr: CValue<'mx>, suggested_ty: Option<CTy<'mx>>) {
         let fkey = self.bb.func.0 as *const _ as usize;
         let Some(slot) = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied() else {
@@ -187,8 +191,19 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         }
 
         let decl_ty = match suggested_ty {
-            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _) | CTyKind::Struct(_)) => {
-                CTy::Ref(kind)
+            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _)) => CTy::Ref(kind),
+            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Struct(_)) => {
+                let struct_ty = CTy::Ref(kind);
+                let info = self
+                    .struct_layout_info(struct_ty)
+                    .unwrap_or_else(|| panic!("missing struct layout metadata for {struct_ty:?}"));
+                if info.repr_c {
+                    struct_ty
+                } else {
+                    CTy::Ref(Interned::new_unchecked(
+                        self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), info.size)),
+                    ))
+                }
             }
             Some(other) => self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
                 panic!("unsupported alloca declaration type suggestion: {other:?}")
@@ -747,25 +762,36 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                         let index = const_index.unwrap_or_else(|| {
                             panic!("gep on struct fields requires constant index")
                         });
-                        let fields = self
-                            .cx
-                            .struct_fields
-                            .borrow()
-                            .get(&projected_ty)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                panic!("missing struct field metadata for {projected_ty:?}")
-                            });
-                        let (field, field_ty) = fields
+                        let info = self.struct_layout_info(projected_ty).unwrap_or_else(|| {
+                            panic!("missing struct layout metadata for {projected_ty:?}")
+                        });
+                        let field = info
+                            .fields
                             .get(index)
-                            .copied()
+                            .cloned()
                             .unwrap_or_else(|| panic!("invalid struct field index {index}"));
-                        expr = if i == 1 {
-                            self.mcx.member_arrow(expr, field)
+                        expr = if info.repr_c {
+                            if i == 1 {
+                                self.mcx.member_arrow(expr, field.name)
+                            } else {
+                                self.mcx.member(expr, field.name)
+                            }
                         } else {
-                            self.mcx.member(expr, field)
+                            let byte_ptr = self.pointer_to(CTy::UInt(CUintTy::U8));
+                            let base = self.mcx.cast(byte_ptr, expr);
+                            let addr = if field.offset == 0 {
+                                base
+                            } else {
+                                self.mcx.index(
+                                    base,
+                                    self.mcx.value(CValue::Scalar(field.offset as i128)),
+                                )
+                            };
+                            let field_ptr = self.pointer_to(field.ty);
+                            let typed_ptr = self.mcx.cast(field_ptr, addr);
+                            self.mcx.unary("*", typed_ptr)
                         };
-                        field_ty
+                        field.ty
                     }
                 },
                 _ => {
