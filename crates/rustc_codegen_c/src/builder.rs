@@ -5,7 +5,9 @@ use std::ops::Deref;
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::traits::{BackendTypes, BuilderMethods, ConstCodegenMethods};
+use rustc_codegen_ssa::traits::{
+    BackendTypes, BuilderMethods, ConstCodegenMethods, LayoutTypeCodegenMethods,
+};
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
 use rustc_hir::LangItem;
@@ -15,7 +17,7 @@ use rustc_middle::ty::layout::{
     LayoutOfHelpers, TyAndLayout,
 };
 use rustc_middle::ty::{Ty, TyCtxt};
-use rustc_target::callconv::FnAbi;
+use rustc_target::callconv::{FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 
 use crate::context::{CBasicBlock, CodegenCx, PendingAlloca};
@@ -109,21 +111,17 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
     }
 
     fn record_value_ty(&mut self, value: CValue<'mx>, ty: CTy<'mx>) {
-        if !matches!(value, CValue::Scalar(_)) {
+        if !matches!(value, CValue::Scalar(_) | CValue::ScalarTyped(_, _)) {
             self.value_tys.insert(value, ty);
             self.cx.value_tys.borrow_mut().insert((self.fkey(), value), ty);
         }
     }
 
     fn value_ty(&self, value: CValue<'mx>) -> Option<CTy<'mx>> {
-        match value {
-            CValue::Scalar(_) => None,
-            _ => self
-                .value_tys
-                .get(&value)
-                .copied()
-                .or_else(|| self.cx.value_tys.borrow().get(&(self.fkey(), value)).copied()),
-        }
+        self.value_tys
+            .get(&value)
+            .copied()
+            .or_else(|| self.cx.value_tys.borrow().get(&(self.fkey(), value)).copied())
     }
 
     fn packed_pair_values(&self, value: CValue<'mx>) -> Option<(CValue<'mx>, CValue<'mx>)> {
@@ -307,14 +305,52 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             self.mcx.arena().alloc(CTyKind::Array(elem_ty, bytes / elem_bytes)),
         )))
     }
+
+    fn abi_tuple_ty_for_pair_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
+        let a = self.cx.scalar_pair_element_backend_type(layout, 0, true);
+        let b = self.cx.scalar_pair_element_backend_type(layout, 1, true);
+        self.cx.abi_tuple_ty(&[a, b])
+    }
+
+    fn build_abi_tuple_from_values(&mut self, tuple_ty: CTy<'mx>, values: &[CValue<'mx>]) -> CValue<'mx> {
+        let tuple = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(tuple, tuple_ty, None)));
+        self.record_value_ty(tuple, tuple_ty);
+
+        for (i, value) in values.iter().copied().enumerate() {
+            let field = self.cx.abi_tuple_field_name(tuple_ty, i);
+            let field_ty = self.cx.abi_tuple_field_ty(tuple_ty, i);
+            let lhs = self.mcx.member(self.mcx.value(tuple), field);
+            let rhs = match self.value_ty(value) {
+                Some(ty) if ty != field_ty => self.mcx.cast(field_ty, self.mcx.value(value)),
+                _ => self.mcx.value(value),
+            };
+            self.bb.func.0.push_stmt(self.mcx.expr_stmt(self.mcx.binary(lhs, rhs, "=")));
+        }
+
+        tuple
+    }
+
+    fn load_abi_tuple_field(&mut self, tuple: CValue<'mx>, tuple_ty: CTy<'mx>, idx: usize) -> CValue<'mx> {
+        let field = self.cx.abi_tuple_field_name(tuple_ty, idx);
+        let field_ty = self.cx.abi_tuple_field_ty(tuple_ty, idx);
+        let value = self.bb.func.0.next_local_var();
+        let field_expr = self.mcx.member(self.mcx.value(tuple), field);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(value, field_ty, Some(field_expr))));
+        self.record_value_ty(value, field_ty);
+        value
+    }
 }
 
 impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     type CodegenCx = CodegenCx<'tcx, 'mx>;
     fn build(cx: &'a Self::CodegenCx, llbb: Self::BasicBlock) -> Self {
+        let fkey = llbb.func.0 as *const _ as usize;
+        cx.current_fkey.set(Some(fkey));
         let mut value_tys = FxHashMap::default();
         for (ty, value) in llbb.func.0.params.iter() {
             value_tys.insert(*value, *ty);
+            cx.value_tys.borrow_mut().insert((fkey, *value), *ty);
         }
         llbb.func.0.emit_label_once(cx.mcx, llbb.label);
         Self { cx, bb: llbb, value_tys }
@@ -352,6 +388,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn ret(&mut self, v: Self::Value) {
+        let ret_ty = self.bb.func.0.ty;
+        if self.cx.abi_tuple_field_tys.borrow().contains_key(&ret_ty) {
+            if let Some((a, b)) = self.packed_pair_values(v) {
+                let tuple = self.build_abi_tuple_from_values(ret_ty, &[a, b]);
+                self.bb.func.0.push_stmt(self.cx.mcx.ret(Some(self.cx.mcx.value(tuple))));
+                return;
+            }
+        }
+
         self.bb.func.0.push_stmt(self.cx.mcx.ret(Some(self.cx.mcx.value(v))))
     }
 
@@ -597,10 +642,28 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value {
+        if matches!(self.value_ty(val), Some(CTy::Bool)) {
+            let backend_bool = CTy::UInt(CUintTy::U8);
+            let ret = self.bb.func.0.next_local_var();
+            let cast = self.mcx.cast(backend_bool, self.mcx.value(val));
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, backend_bool, Some(cast))));
+            self.record_value_ty(ret, backend_bool);
+            return ret;
+        }
+
         val
     }
 
     fn to_immediate_scalar(&mut self, val: Self::Value, scalar: rustc_abi::Scalar) -> Self::Value {
+        if scalar.is_bool() && !matches!(self.value_ty(val), Some(CTy::Bool)) {
+            let ret = self.bb.func.0.next_local_var();
+            let zero = self.mcx.value(CValue::Scalar(0));
+            let expr = self.mcx.binary(self.mcx.value(val), zero, "!=");
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, CTy::Bool, Some(expr))));
+            self.record_value_ty(ret, CTy::Bool);
+            return ret;
+        }
+
         val
     }
 
@@ -1180,7 +1243,6 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 
         let fn_abi = fn_abi.unwrap();
-        let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
 
         let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
         let mut callee = llfn;
@@ -1195,14 +1257,48 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         }
 
         let call = self.mcx.call(self.mcx.value(callee), args);
-        if ret_ty == CTy::Void {
-            self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
-            CValue::Scalar(0)
-        } else {
-            let ret = self.bb.func.0.next_local_var();
-            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
-            self.record_value_ty(ret, ret_ty);
-            ret
+        match fn_abi.ret.mode {
+            PassMode::Ignore | PassMode::Indirect { .. } => {
+                self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+                CValue::Scalar(0)
+            }
+            PassMode::Direct(_) => {
+                let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
+                if ret_ty == CTy::Void {
+                    self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+                    CValue::Scalar(0)
+                } else {
+                    let ret = self.bb.func.0.next_local_var();
+                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
+                    self.record_value_ty(ret, ret_ty);
+                    ret
+                }
+            }
+            PassMode::Pair(_, _) => {
+                let tuple_ty = self.abi_tuple_ty_for_pair_layout(fn_abi.ret.layout);
+                let tuple = self.bb.func.0.next_local_var();
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(tuple, tuple_ty, Some(call))));
+                self.record_value_ty(tuple, tuple_ty);
+
+                let a = self.load_abi_tuple_field(tuple, tuple_ty, 0);
+                let b = self.load_abi_tuple_field(tuple, tuple_ty, 1);
+                let ret = self.bb.func.0.next_local_var();
+                self.set_packed_pair_values(ret, a, b);
+                ret
+            }
+            PassMode::Cast { ref cast, pad_i32: _ } => {
+                let field_tys = self
+                    .cx
+                    .cast_target_to_c_abi_pieces(cast)
+                    .into_iter()
+                    .map(|(_, ty)| ty)
+                    .collect::<Vec<_>>();
+                let tuple_ty = self.cx.abi_tuple_ty(&field_tys);
+                let ret = self.bb.func.0.next_local_var();
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, tuple_ty, Some(call))));
+                self.record_value_ty(ret, tuple_ty);
+                ret
+            }
         }
     }
 

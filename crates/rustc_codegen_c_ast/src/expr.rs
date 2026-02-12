@@ -12,6 +12,8 @@ use crate::ModuleCtx;
 pub enum CValue<'mx> {
     /// A constant scalar
     Scalar(i128),
+    /// A constant scalar with a unique identity so backend metadata can be tracked per value.
+    ScalarTyped(i128, u64),
     /// A local variable indexed by a number, in the form `_0`, `_1`, etc.
     Local(usize),
     /// A function name
@@ -103,6 +105,7 @@ impl Print for CValue<'_> {
     fn print_to(&self, ctx: &mut PrinterCtx) {
         match self {
             CValue::Scalar(i) => ctx.word(i.to_string()),
+            CValue::ScalarTyped(i, _) => ctx.word(i.to_string()),
             CValue::Local(i) => ctx.word(format!("_{}", i)),
             CValue::Func(name) => ctx.word(name.to_string()),
         }

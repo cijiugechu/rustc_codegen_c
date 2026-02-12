@@ -107,6 +107,13 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
+        if let BackendRepr::ScalarPair(_, _) = layout.backend_repr {
+            return self.abi_tuple_ty(&[
+                self.scalar_pair_element_backend_type(layout, 0, true),
+                self.scalar_pair_element_backend_type(layout, 1, true),
+            ]);
+        }
+
         match layout.ty.kind() {
             TyKind::Bool => CTy::Bool,
             TyKind::Int(int) => self.mcx.get_int_type(*int),

@@ -62,22 +62,54 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     ) {
         let fn_abi = self.fn_abi_of_instance(instance, ty::List::empty());
 
-        let args = fn_abi.args.iter().flat_map(|arg| match arg.mode {
-            PassMode::Ignore => Vec::new(),
-            PassMode::Direct(_) => vec![self.immediate_backend_type(arg.layout)],
-            PassMode::Pair(_, _) => vec![
-                self.scalar_pair_element_backend_type(arg.layout, 0, true),
-                self.scalar_pair_element_backend_type(arg.layout, 1, true),
-            ],
-            PassMode::Cast { .. } | PassMode::Indirect { .. } => {
-                panic!("predefine_fn does not support arg pass mode {:?} yet", arg.mode)
+        let mut args = Vec::new();
+        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
+            args.push(self.indirect_ptr_ty_for_layout(fn_abi.ret.layout));
+        }
+        for arg in fn_abi.args.iter() {
+            match arg.mode {
+                PassMode::Ignore => {}
+                PassMode::Direct(_) => args.push(self.immediate_backend_type(arg.layout)),
+                PassMode::Pair(_, _) => {
+                    args.push(self.scalar_pair_element_backend_type(arg.layout, 0, true));
+                    args.push(self.scalar_pair_element_backend_type(arg.layout, 1, true));
+                }
+                PassMode::Cast { ref cast, pad_i32 } => {
+                    if pad_i32 {
+                        args.push(rustc_codegen_c_ast::ty::CTy::UInt(
+                            rustc_codegen_c_ast::ty::CUintTy::U32,
+                        ));
+                    }
+                    args.extend(
+                        self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty),
+                    );
+                }
+                PassMode::Indirect { meta_attrs: None, .. } => {
+                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
+                }
+                PassMode::Indirect { meta_attrs: Some(_), .. } => {
+                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
+                    args.push(rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(
+                        self.mcx.arena().alloc(rustc_codegen_c_ast::ty::CTyKind::Pointer(
+                            rustc_codegen_c_ast::ty::CTy::UInt(
+                                rustc_codegen_c_ast::ty::CUintTy::U8,
+                            ),
+                        )),
+                    )));
+                }
             }
-        });
+        }
         let ret = match fn_abi.ret.mode {
-            PassMode::Ignore => rustc_codegen_c_ast::ty::CTy::Void,
+            PassMode::Ignore | PassMode::Indirect { .. } => rustc_codegen_c_ast::ty::CTy::Void,
             PassMode::Direct(_) => self.immediate_backend_type(fn_abi.ret.layout),
-            PassMode::Pair(_, _) | PassMode::Cast { .. } | PassMode::Indirect { .. } => {
-                panic!("predefine_fn does not support return pass mode {:?} yet", fn_abi.ret.mode)
+            PassMode::Pair(_, _) => self.abi_tuple_ty(&[
+                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 0, true),
+                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 1, true),
+            ]),
+            PassMode::Cast { ref cast, pad_i32: _ } => {
+                let fields =
+                    self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty).collect::<Vec<_>>();
+                self.abi_tuple_ty(&fields)
             }
         };
 

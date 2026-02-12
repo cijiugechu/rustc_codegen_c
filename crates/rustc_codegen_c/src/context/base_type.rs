@@ -56,7 +56,17 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_kind(&self, ty: Self::Type) -> rustc_codegen_ssa::common::TypeKind {
-        todo!()
+        match ty {
+            CTy::Void => rustc_codegen_ssa::common::TypeKind::Void,
+            CTy::Bool | CTy::Char | CTy::Int(_) | CTy::UInt(_) => {
+                rustc_codegen_ssa::common::TypeKind::Integer
+            }
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(_) => rustc_codegen_ssa::common::TypeKind::Pointer,
+                CTyKind::Array(_, _) => rustc_codegen_ssa::common::TypeKind::Array,
+                CTyKind::Struct(_) => rustc_codegen_ssa::common::TypeKind::Struct,
+            },
+        }
     }
 
     fn type_ptr(&self) -> Self::Type {
@@ -112,6 +122,12 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn val_ty(&self, v: Self::Value) -> Self::Type {
-        panic!("val_ty is not supported on CodegenCx")
+        if let Some(fkey) = self.current_fkey.get() {
+            if let Some(ty) = self.value_tys.borrow().get(&(fkey, v)).copied() {
+                return ty;
+            }
+        }
+
+        panic!("val_ty is not known for value {v:?}")
     }
 }

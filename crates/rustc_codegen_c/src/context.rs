@@ -2,14 +2,16 @@
 
 use rustc_middle::ty;
 use rustc_middle::ty::layout::HasTypingEnv;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 
-use rustc_abi::{HasDataLayout, TargetDataLayout};
+use rustc_abi::{HasDataLayout, Reg, RegKind, Size, TargetDataLayout};
+use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::func::CFunc;
-use rustc_codegen_c_ast::ty::CTy;
+use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_c_ast::ModuleCtx;
+use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_codegen_ssa::traits::BackendTypes;
 use rustc_hash::FxHashMap;
 use rustc_hir::def::DefKind;
@@ -21,6 +23,7 @@ use rustc_middle::ty::layout::{
 use rustc_middle::ty::{Instance, Ty, TyCtxt};
 use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
+use rustc_type_ir::TyKind;
 
 mod asm;
 mod base_type;
@@ -88,8 +91,12 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
     /// Mapping from Rust static definitions to their generated C symbols.
     pub static_symbols: RefCell<FxHashMap<DefId, &'mx str>>,
+    /// Monotonic counter for assigning unique identities to typed scalar constants.
+    pub scalar_ids: Cell<u64>,
     /// Per-function value type cache shared across basic blocks.
     pub value_tys: RefCell<FxHashMap<(usize, CValue<'mx>), CTy<'mx>>>,
+    /// The currently active function key for value type queries through `CodegenCx`.
+    pub current_fkey: Cell<Option<usize>>,
     /// Per-function virtual packed scalar pairs used by extract/insert helpers.
     pub packed_scalar_pairs: RefCell<FxHashMap<(usize, CValue<'mx>), (CValue<'mx>, CValue<'mx>)>>,
     /// Per-function pointer pointee metadata.
@@ -106,6 +113,12 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub adt_layouts: RefCell<FxHashMap<Ty<'tcx>, AdtLayoutInfo<'mx>>>,
     /// Mapping from C struct marker type to computed layout metadata.
     pub struct_layouts: RefCell<FxHashMap<CTy<'mx>, AdtLayoutInfo<'mx>>>,
+    /// Cache of synthetic tuple-like ABI struct types used for multi-register aggregates.
+    pub abi_tuple_structs: RefCell<FxHashMap<Vec<CTy<'mx>>, CTy<'mx>>>,
+    /// Field names for each synthetic ABI tuple-like struct type.
+    pub abi_tuple_fields: RefCell<FxHashMap<CTy<'mx>, Vec<&'mx str>>>,
+    /// Field types for each synthetic ABI tuple-like struct type.
+    pub abi_tuple_field_tys: RefCell<FxHashMap<CTy<'mx>, Vec<CTy<'mx>>>>,
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
@@ -119,7 +132,9 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
             static_symbols: RefCell::new(FxHashMap::default()),
+            scalar_ids: Cell::new(0),
             value_tys: RefCell::new(FxHashMap::default()),
+            current_fkey: Cell::new(None),
             packed_scalar_pairs: RefCell::new(FxHashMap::default()),
             ptr_pointees: RefCell::new(FxHashMap::default()),
             ptr_lvalues: RefCell::new(FxHashMap::default()),
@@ -128,6 +143,9 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             adt_types: RefCell::new(FxHashMap::default()),
             adt_layouts: RefCell::new(FxHashMap::default()),
             struct_layouts: RefCell::new(FxHashMap::default()),
+            abi_tuple_structs: RefCell::new(FxHashMap::default()),
+            abi_tuple_fields: RefCell::new(FxHashMap::default()),
+            abi_tuple_field_tys: RefCell::new(FxHashMap::default()),
         };
         cx.predeclare_repr_c_structs();
         cx
@@ -184,6 +202,113 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 self.define_simple_struct_layout(layout, *adt_def, args);
             }
         }
+    }
+
+    pub(crate) fn reg_to_c_ty(&self, reg: Reg) -> CTy<'mx> {
+        match (reg.kind, reg.size.bytes()) {
+            (RegKind::Integer, 1) => CTy::UInt(CUintTy::U8),
+            (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
+            (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
+            (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            _ => panic!("unsupported ABI register for C backend: {reg:?}"),
+        }
+    }
+
+    pub(crate) fn cast_target_to_c_abi_pieces(
+        &self,
+        cast: &rustc_target::callconv::CastTarget,
+    ) -> Vec<(usize, CTy<'mx>)> {
+        let mut out = Vec::new();
+
+        if let Some(offset_from_start) = cast.rest_offset {
+            let first = cast.prefix[0].expect("invalid cast target without first prefix register");
+            out.push((0, self.reg_to_c_ty(first)));
+            out.push((offset_from_start.bytes_usize(), self.reg_to_c_ty(cast.rest.unit)));
+            return out;
+        }
+
+        let mut offset = 0usize;
+        for reg in cast.prefix.iter().flatten() {
+            out.push((offset, self.reg_to_c_ty(*reg)));
+            offset += reg.size.bytes_usize();
+        }
+
+        let rest_unit_bytes = cast.rest.unit.size.bytes_usize();
+        if rest_unit_bytes != 0 {
+            let rest_total = cast.rest.total.bytes_usize();
+            let rest_count = rest_total / rest_unit_bytes;
+            let rem_bytes = rest_total % rest_unit_bytes;
+
+            for _ in 0..rest_count {
+                out.push((offset, self.reg_to_c_ty(cast.rest.unit)));
+                offset += rest_unit_bytes;
+            }
+
+            if rem_bytes != 0 {
+                out.push((
+                    offset,
+                    self.reg_to_c_ty(Reg {
+                        kind: RegKind::Integer,
+                        size: Size::from_bytes(rem_bytes as u64),
+                    }),
+                ));
+            }
+        }
+
+        out
+    }
+
+    pub(crate) fn abi_tuple_ty(&self, fields: &[CTy<'mx>]) -> CTy<'mx> {
+        if let Some(ty) = self.abi_tuple_structs.borrow().get(fields).copied() {
+            return ty;
+        }
+
+        let idx = self.abi_tuple_structs.borrow().len();
+        let name = self.mcx.alloc_str(&format!("__rcgenc_abi_tuple_{idx}"));
+        let ty = CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Struct(name)),
+        ));
+
+        let mut field_names = Vec::with_capacity(fields.len());
+        let mut struct_fields = Vec::with_capacity(fields.len());
+        for (i, field_ty) in fields.iter().copied().enumerate() {
+            let field_name = self.mcx.alloc_str(&format!("f{i}"));
+            field_names.push(field_name);
+            struct_fields.push(CStructField { name: field_name, ty: field_ty });
+        }
+        self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
+        self.abi_tuple_structs.borrow_mut().insert(fields.to_vec(), ty);
+        self.abi_tuple_fields.borrow_mut().insert(ty, field_names);
+        self.abi_tuple_field_tys.borrow_mut().insert(ty, fields.to_vec());
+        ty
+    }
+
+    pub(crate) fn abi_tuple_field_name(&self, tuple_ty: CTy<'mx>, idx: usize) -> &'mx str {
+        *self
+            .abi_tuple_fields
+            .borrow()
+            .get(&tuple_ty)
+            .and_then(|fields| fields.get(idx))
+            .unwrap_or_else(|| panic!("missing ABI tuple field {idx} for {tuple_ty:?}"))
+    }
+
+    pub(crate) fn abi_tuple_field_ty(&self, tuple_ty: CTy<'mx>, idx: usize) -> CTy<'mx> {
+        *self
+            .abi_tuple_field_tys
+            .borrow()
+            .get(&tuple_ty)
+            .and_then(|fields| fields.get(idx))
+            .unwrap_or_else(|| panic!("missing ABI tuple field type {idx} for {tuple_ty:?}"))
+    }
+
+    pub(crate) fn indirect_ptr_ty_for_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
+        let pointee = match layout.ty.kind() {
+            TyKind::Adt(..) | TyKind::Array(..) => self.backend_type(layout),
+            _ => CTy::UInt(CUintTy::U8),
+        };
+        CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Pointer(pointee)),
+        ))
     }
 }
 
