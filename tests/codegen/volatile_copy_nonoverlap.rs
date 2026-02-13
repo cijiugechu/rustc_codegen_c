@@ -4,6 +4,7 @@
 //@ exit-code: 13
 
 #![feature(core_intrinsics)]
+#![allow(internal_features)]
 #![no_std]
 #![no_main]
 
@@ -20,11 +21,7 @@ fn do_volatile_copy() -> i32 {
     let src = [5u8, 6, 7, 8];
     let mut dst = [0u8; 4];
     unsafe {
-        intrinsics::volatile_copy_nonoverlapping_memory::<u8>(
-            dst.as_mut_ptr(),
-            src.as_ptr(),
-            4,
-        );
+        intrinsics::volatile_copy_nonoverlapping_memory::<u8>(dst.as_mut_ptr(), src.as_ptr(), 4);
         let a = dst[0] as i32;
         let b = dst[3] as i32;
         a + b

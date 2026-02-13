@@ -4,6 +4,7 @@
 //@ exit-code: 55
 
 #![feature(core_intrinsics)]
+#![allow(internal_features)]
 #![no_std]
 #![no_main]
 

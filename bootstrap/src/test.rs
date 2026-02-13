@@ -1,5 +1,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anstream::{eprint as print, eprintln as println};
 use clap::{Args, ValueEnum};
@@ -393,6 +394,12 @@ impl TestCase {
         if manifest.optimize {
             command.arg("-O");
         }
+        if self.source_uses_sysroot_libc() {
+            let libc_rlib = sysroot_libc_rlib().unwrap_or_else(|| {
+                panic!("failed to locate sysroot libc rlib for {}", self.source.display())
+            });
+            command.arg("--extern").arg(format!("libc={}", libc_rlib.display()));
+        }
         command.arg(&self.source).arg("-o").arg(&self.output_file);
         self.command_status("compile", &mut command);
     }
@@ -405,8 +412,20 @@ impl TestCase {
         if manifest.optimize {
             command.arg("-O");
         }
+        if self.source_uses_sysroot_libc() {
+            let libc_rlib = sysroot_libc_rlib().unwrap_or_else(|| {
+                panic!("failed to locate sysroot libc rlib for {}", self.source.display())
+            });
+            command.arg("--extern").arg(format!("libc={}", libc_rlib.display()));
+        }
         command.arg(&self.source).arg("--out-dir").arg(output_dir);
         self.command_status("compile lib", &mut command);
+    }
+
+    fn source_uses_sysroot_libc(&self) -> bool {
+        let source = std::fs::read_to_string(&self.source)
+            .unwrap_or_else(|e| panic!("failed to read {}: {}", self.source.display(), e));
+        source.contains("extern crate libc") && source.contains("feature(rustc_private)")
     }
 
     /// Get the generated C file f
@@ -538,4 +557,38 @@ enum TestDirective {
     ExitCode(i32),
     /// Auxiliary build requirement
     AuxBuild(String),
+}
+
+fn sysroot_libc_rlib() -> Option<PathBuf> {
+    static LIBC_RLIB: OnceLock<Option<PathBuf>> = OnceLock::new();
+    LIBC_RLIB
+        .get_or_init(|| {
+            let output = std::process::Command::new("rustc")
+                .args(["--print", "target-libdir"])
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+
+            let target_libdir = String::from_utf8(output.stdout).ok()?;
+            let target_libdir = target_libdir.trim();
+
+            let mut matches: Vec<PathBuf> = std::fs::read_dir(target_libdir)
+                .ok()?
+                .filter_map(|entry| {
+                    let path = entry.ok()?.path();
+                    let file_name = path.file_name()?.to_str()?;
+                    if file_name.starts_with("liblibc-") && file_name.ends_with(".rlib") {
+                        Some(path)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            matches.sort();
+            matches.into_iter().next()
+        })
+        .clone()
 }
