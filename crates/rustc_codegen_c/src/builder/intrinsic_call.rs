@@ -1,11 +1,11 @@
+use rustc_codegen_c_ast::ty::{CTy, CUintTy};
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
-use rustc_codegen_c_ast::ty::{CTy, CUintTy};
 use rustc_codegen_ssa::traits::{
     BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods, LayoutTypeCodegenMethods,
 };
-use rustc_middle::ty::Instance;
 use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::Instance;
 use rustc_span::sym;
 
 use crate::builder::Builder;
