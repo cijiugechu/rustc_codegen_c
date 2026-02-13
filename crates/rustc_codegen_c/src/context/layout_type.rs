@@ -271,10 +271,18 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
+        if matches!(layout.ty.kind(), TyKind::Bool) {
+            return CTy::Bool;
+        }
+
+        match layout.ty.kind() {
+            // Keep pointer-width integer semantics, so `usize/isize` become `size_t`.
+            TyKind::Int(int) => return self.mcx.get_int_type(*int),
+            TyKind::Uint(uint) => return self.mcx.get_uint_type(*uint),
+            _ => {}
+        }
+
         if let BackendRepr::Scalar(scalar) = layout.backend_repr {
-            if matches!(layout.ty.kind(), TyKind::Bool) {
-                return CTy::Bool;
-            }
             return self.scalar_backend_type(scalar);
         }
 

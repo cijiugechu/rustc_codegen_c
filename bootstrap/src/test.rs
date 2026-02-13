@@ -471,17 +471,34 @@ impl TestCase {
     pub fn generated(&self) -> PathBuf {
         let case = self.source.file_stem().unwrap().to_string_lossy();
         let prefix = format!("{case}.");
-        let generated = std::fs::read_dir(self.output_file.parent().unwrap())
+        let primary_prefix = format!("{case}.{case}.");
+        let mut generated: Vec<PathBuf> = std::fs::read_dir(self.output_file.parent().unwrap())
             .unwrap()
             .filter_map(|entry| entry.ok())
-            .find(|entry| {
+            .filter(|entry| {
                 let filename = entry.file_name();
                 let filename = filename.to_string_lossy();
                 filename.ends_with(".c") && filename.starts_with(prefix.as_str())
-            });
+            })
+            .map(|entry| entry.path())
+            .collect();
 
-        assert!(generated.is_some(), "could not find {case}'s generated file");
-        generated.unwrap().path()
+        assert!(!generated.is_empty(), "could not find {case}'s generated file");
+
+        generated.sort();
+
+        if let Some(primary) = generated.iter().find(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().starts_with(primary_prefix.as_str()))
+                .unwrap_or(false)
+        }) {
+            return primary.clone();
+        }
+
+        generated
+            .into_iter()
+            .max_by_key(|path| path.metadata().map(|m| m.len()).unwrap_or(0))
+            .expect("generated candidates are non-empty")
     }
 
     /// Parse test directives from the source file
