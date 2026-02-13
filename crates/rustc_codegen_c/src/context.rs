@@ -19,7 +19,7 @@ use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOf, LayoutOfHelpers,
     TyAndLayout,
 };
-use rustc_middle::ty::{Instance, Ty, TyCtxt};
+use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty, TyCtxt};
 use rustc_target::callconv::FnAbi;
 use rustc_target::spec::{HasTargetSpec, Target};
 use rustc_type_ir::TyKind;
@@ -100,6 +100,8 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
     pub function_instances: RefCell<FxHashMap<Instance<'tcx>, CFunc<'mx>>>,
+    /// Cache of generated dynamic vtable pointers.
+    pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), CValue<'mx>>>,
     /// Cached exception personality function symbol.
     pub eh_personality_fn: RefCell<Option<CFunc<'mx>>>,
     /// Mapping from Rust static definitions to their generated C symbols.
@@ -146,6 +148,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             tcx,
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
+            vtables: RefCell::new(FxHashMap::default()),
             eh_personality_fn: RefCell::new(None),
             static_symbols: RefCell::new(FxHashMap::default()),
             scalar_ids: Cell::new(0),

@@ -769,15 +769,78 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn shl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "shl");
+        if !matches!(ty, CTy::Int(_) | CTy::UInt(_)) {
+            panic!("unsupported type for shl: {ty:?}");
+        }
+
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "<<");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn lshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "lshr");
+        if !matches!(ty, CTy::Int(_) | CTy::UInt(_)) {
+            panic!("unsupported type for lshr: {ty:?}");
+        }
+
+        let ret = self.bb.func.0.next_local_var();
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = match ty {
+            CTy::UInt(_) => {
+                let lhs = self.coerce_int_operand_expr(lhs, ty);
+                self.mcx.binary(lhs, rhs, ">>")
+            }
+            CTy::Int(_) => {
+                let unsigned_ty = ty.to_unsigned();
+                let lhs = self.coerce_int_operand_expr(lhs, unsigned_ty);
+                let shifted = self.mcx.binary(lhs, rhs, ">>");
+                self.mcx.cast(ty, shifted)
+            }
+            _ => unreachable!(),
+        };
+
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn ashr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_bitwise_binop_ty(lhs, rhs, "ashr");
+        if !matches!(ty, CTy::Int(_) | CTy::UInt(_)) {
+            panic!("unsupported type for ashr: {ty:?}");
+        }
+
+        let ret = self.bb.func.0.next_local_var();
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = match ty {
+            CTy::Int(_) => {
+                let lhs = self.coerce_int_operand_expr(lhs, ty);
+                self.mcx.binary(lhs, rhs, ">>")
+            }
+            CTy::UInt(uint_ty) => {
+                let signed_ty = match uint_ty {
+                    CUintTy::Usize => CTy::Int(CIntTy::Isize),
+                    CUintTy::U8 => CTy::Int(CIntTy::I8),
+                    CUintTy::U16 => CTy::Int(CIntTy::I16),
+                    CUintTy::U32 => CTy::Int(CIntTy::I32),
+                    CUintTy::U64 => CTy::Int(CIntTy::I64),
+                };
+                let lhs = self.coerce_int_operand_expr(lhs, signed_ty);
+                let shifted = self.mcx.binary(lhs, rhs, ">>");
+                self.mcx.cast(ty, shifted)
+            }
+            _ => unreachable!(),
+        };
+
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn unchecked_sadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {

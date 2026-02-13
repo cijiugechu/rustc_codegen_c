@@ -48,7 +48,7 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn vtables(
         &self,
     ) -> &RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), Self::Value>> {
-        todo!()
+        &self.vtables
     }
 
     fn get_fn(&self, instance: Instance<'tcx>) -> Self::Function {

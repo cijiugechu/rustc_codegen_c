@@ -20,7 +20,7 @@ fn takes_str(_s: &str) -> i32 {
 // CHECK: { ((uint8_t *)"hello"), 5 }
 // CHECK-LABEL: main
 // CHECK: *(uint8_t **) ((uint8_t *)&
-// CHECK: (uint64_t) ((uint8_t *)&
+// CHECK: (uint64_t) _1[8];
 #[no_mangle]
 pub fn main() -> i32 {
     takes_str(S)

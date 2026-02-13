@@ -85,7 +85,13 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
                         let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{target_symbol})"));
                         CValue::Func(expr)
                     }
-                    GlobalAlloc::VTable(..) | GlobalAlloc::TypeId { .. } => CValue::Scalar(0),
+                    GlobalAlloc::VTable(ty, dyn_ty) => self.get_vtable_value(
+                        ty,
+                        dyn_ty.principal().map(|principal| {
+                            self.tcx.instantiate_bound_regions_with_erased(principal)
+                        }),
+                    ),
+                    GlobalAlloc::TypeId { .. } => CValue::Scalar(0),
                 };
                 let ptr = self.const_ptr_byte_offset(base_ptr, Size::from_bytes(addend));
 

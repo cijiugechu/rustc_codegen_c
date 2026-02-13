@@ -13,7 +13,7 @@ impl<'tcx, 'mx> DebugInfoCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         trait_ref: Option<ExistentialTraitRef<'tcx>>,
         vtable: Self::Value,
     ) {
-        todo!()
+        let _ = (ty, trait_ref, vtable);
     }
 
     fn create_function_debug_context(
