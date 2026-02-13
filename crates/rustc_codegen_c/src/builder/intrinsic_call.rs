@@ -106,6 +106,19 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 );
                 Ok(())
             }
+            sym::black_box => {
+                args[0].val.store(self, llresult);
+
+                let ptr =
+                    self.mcx.cast(self.pointer_to(CTy::Void), self.mcx.value(llresult.val.llval));
+                let size = self.const_usize(llresult.layout.size.bytes());
+                let observe = self.mcx.call(
+                    self.mcx.raw("__rust_black_box_observe"),
+                    vec![ptr, self.mcx.value(size)],
+                );
+                self.bb.func.0.push_stmt(self.mcx.expr_stmt(observe));
+                Ok(())
+            }
             sym::ctpop => {
                 let ret_ty = self.cx.immediate_backend_type(llresult.layout);
                 let (_, bits, _) = self

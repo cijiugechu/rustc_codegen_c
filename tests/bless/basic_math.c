@@ -17,6 +17,12 @@
 #define __rust_utos(u, s, v, m) \
     ((v) <= (m) ? ((s)v) : ((s)((u)(v) - (u)(m) - 1)))
 
+static inline void __rust_black_box_observe(const void *ptr, size_t size) {
+    if (size != 0) {
+        (void)*(const volatile unsigned char *)ptr;
+    }
+}
+
 static inline _Noreturn void __rust_panic_bounds_check(size_t index, size_t len) {
     (void)index;
     (void)len;
