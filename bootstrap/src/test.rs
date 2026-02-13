@@ -430,6 +430,7 @@ impl TestCase {
         std::fs::create_dir_all(output_dir).unwrap();
         let mut command = manifest.rustc();
         command.args(["--crate-type", "bin"]);
+        command.args(["-A", "dead_code"]);
         if manifest.optimize {
             command.arg("-O");
         }
@@ -448,6 +449,7 @@ impl TestCase {
         std::fs::create_dir_all(output_dir).unwrap();
         let mut command = manifest.rustc();
         command.args(["--crate-type", "lib"]);
+        command.args(["-A", "dead_code"]);
         if manifest.optimize {
             command.arg("-O");
         }
