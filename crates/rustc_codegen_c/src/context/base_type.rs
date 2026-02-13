@@ -132,7 +132,20 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             }
         }
 
-        if let rustc_codegen_c_ast::expr::CValue::Func(_) = v {
+        if let rustc_codegen_c_ast::expr::CValue::Func(name) = v {
+            if let Some((ret, params)) = {
+                let funcs = self.mcx.module().funcs.borrow();
+                funcs.iter().find(|func| func.0.name == name).map(|func| {
+                    (func.0.ty, func.0.params.iter().map(|(ty, _)| *ty).collect::<Vec<_>>())
+                })
+            } {
+                let fn_ty = CTy::Ref(Interned::new_unchecked(
+                    self.mcx.arena().alloc(CTyKind::Function { ret, params }),
+                ));
+                return CTy::Ref(Interned::new_unchecked(
+                    self.mcx.arena().alloc(CTyKind::Pointer(fn_ty)),
+                ));
+            }
             return self.type_ptr();
         }
 

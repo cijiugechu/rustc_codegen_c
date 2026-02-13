@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::{CFunc, CFuncKind};
-use rustc_codegen_c_ast::ty::{CIntTy, CTy};
+use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind};
 use rustc_codegen_ssa::traits::MiscCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
@@ -40,6 +40,23 @@ fn sanitize_symbol_name(symbol_name: &str) -> String {
         }
     }
     out
+}
+
+fn function_signature_from_type<'mx>(fn_type: CTy<'mx>) -> (CTy<'mx>, Vec<CTy<'mx>>) {
+    match fn_type {
+        CTy::Ref(kind) => match kind.0 {
+            CTyKind::Function { ret, params } => (*ret, params.clone()),
+            CTyKind::Pointer(pointee) => match *pointee {
+                CTy::Ref(inner) => match inner.0 {
+                    CTyKind::Function { ret, params } => (*ret, params.clone()),
+                    _ => panic!("declare_c_main expects function type, got pointer to {inner:?}"),
+                },
+                _ => panic!("declare_c_main expects pointer-to-function type, got {fn_type:?}"),
+            },
+            _ => panic!("declare_c_main expects function type, got {fn_type:?}"),
+        },
+        _ => panic!("declare_c_main expects function type, got {fn_type:?}"),
+    }
 }
 
 impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
@@ -149,15 +166,37 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         self.tcx.sess
     }
 
-    fn set_frame_pointer_type(&self, llfn: Self::Function) {
-        todo!()
+    fn set_frame_pointer_type(&self, _llfn: Self::Function) {
+        // no-op for C backend
     }
 
-    fn apply_target_cpu_attr(&self, llfn: Self::Function) {
-        todo!()
+    fn apply_target_cpu_attr(&self, _llfn: Self::Function) {
+        // no-op for C backend
     }
 
     fn declare_c_main(&self, fn_type: Self::Type) -> Option<Self::Function> {
-        todo!()
+        let entry_name = self.sess().target.entry_name.as_ref();
+        if self.mcx.module().funcs.borrow().iter().any(|func| func.0.name == entry_name) {
+            return None;
+        }
+
+        let (ret, mut params) = function_signature_from_type(fn_type);
+        if self.sess().target.main_needs_argc_argv
+            && !self.sess().target.os.contains("uefi")
+            && params.len() == 2
+        {
+            let char_ptr = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::Char)),
+            ));
+            let argv_ty = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(char_ptr)),
+            ));
+            params[1] = argv_ty;
+        }
+        let func = Interned::new_unchecked(
+            self.mcx.func(CFuncKind::new(self.mcx.alloc_str(entry_name), ret, params)),
+        );
+        self.mcx.module().push_func(func);
+        Some(func)
     }
 }

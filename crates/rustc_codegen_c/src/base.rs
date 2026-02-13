@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use rustc_codegen_c_ast::{ModuleArena, ModuleCtx};
+use rustc_codegen_ssa::base::maybe_create_entry_wrapper;
 use rustc_codegen_ssa::mono_item::MonoItemExt;
 use rustc_codegen_ssa::ModuleCodegen;
 use rustc_middle::dep_graph;
@@ -60,6 +61,9 @@ fn module_codegen(tcx: TyCtxt<'_>, cgu_name: rustc_span::Symbol) -> ModuleCodege
     for &(mono_item, item_data) in &mono_items {
         mono_item.define::<Builder<'_, '_, '_>>(&mut cx, cgu_name.as_str(), item_data);
     }
+
+    // If this CGU contains Rust main, generate target entry wrapper (e.g. C main).
+    maybe_create_entry_wrapper::<Builder<'_, '_, '_>>(&cx, cgu);
 
     let module = mcx.to_string();
     ModuleCodegen::new_regular(cgu_name.to_string(), module)

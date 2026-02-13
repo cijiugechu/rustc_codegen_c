@@ -298,6 +298,23 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
     }
 
+    fn call_signature_from_ty(&self, llty: CTy<'mx>) -> (CTy<'mx>, CTy<'mx>) {
+        match llty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Function { ret, .. } => (*ret, self.pointer_to(llty)),
+                CTyKind::Pointer(pointee) => match *pointee {
+                    CTy::Ref(inner) => match inner.0 {
+                        CTyKind::Function { ret, .. } => (*ret, llty),
+                        _ => panic!("call expects function type, got pointer to {inner:?}"),
+                    },
+                    _ => panic!("call expects pointer-to-function type, got {llty:?}"),
+                },
+                _ => panic!("call expects function type, got {llty:?}"),
+            },
+            _ => panic!("call expects function type, got {llty:?}"),
+        }
+    }
+
     fn pointer_pointee_ty(&self, ptr: CValue<'mx>) -> Option<CTy<'mx>> {
         let fkey = self.bb.func.0 as *const _ as usize;
         if let Some(pointee) = self.cx.ptr_pointees.borrow().get(&(fkey, ptr)).copied() {
@@ -1724,23 +1741,99 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
-        let fn_abi = fn_abi.unwrap();
-
-        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
-            if let Some(ret_ptr) = args.first().copied() {
-                self.ensure_alloca_decl(ret_ptr, Some(self.cx.backend_type(fn_abi.ret.layout)));
+        if let Some(fn_abi) = fn_abi {
+            if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
+                if let Some(ret_ptr) = args.first().copied() {
+                    self.ensure_alloca_decl(ret_ptr, Some(self.cx.backend_type(fn_abi.ret.layout)));
+                }
             }
-        }
-        let arg_start = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
-        for (abi_arg, value) in fn_abi.args.iter().zip(args.iter().skip(arg_start)) {
-            if matches!(abi_arg.mode, PassMode::Indirect { meta_attrs: None, .. }) {
-                self.ensure_alloca_decl(*value, Some(self.cx.backend_type(abi_arg.layout)));
+            let arg_start = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
+            for (abi_arg, value) in fn_abi.args.iter().zip(args.iter().skip(arg_start)) {
+                if matches!(abi_arg.mode, PassMode::Indirect { meta_attrs: None, .. }) {
+                    self.ensure_alloca_decl(*value, Some(self.cx.backend_type(abi_arg.layout)));
+                }
             }
-        }
-        for value in args.iter().copied() {
-            self.ensure_alloca_byte_array_decl(value);
+            for value in args.iter().copied() {
+                self.ensure_alloca_byte_array_decl(value);
+            }
+
+            let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
+            let mut callee = llfn;
+            if instance
+                .and_then(|inst| self.tcx.lang_items().from_def_id(inst.def_id()))
+                .is_some_and(|item| item == LangItem::PanicBoundsCheck)
+            {
+                callee = CValue::Func("__rust_panic_bounds_check");
+                if args.len() > 2 {
+                    args.truncate(2);
+                }
+            }
+
+            let expected_callee_ty = self.cx.fn_ptr_backend_type(fn_abi);
+            let callee_expr = match callee {
+                CValue::Func(_) => self.mcx.value(callee),
+                _ => self.mcx.cast(expected_callee_ty, self.mcx.value(callee)),
+            };
+
+            let call = self.mcx.call(callee_expr, args);
+            return match fn_abi.ret.mode {
+                PassMode::Ignore | PassMode::Indirect { .. } => {
+                    self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+                    CValue::Scalar(0)
+                }
+                PassMode::Direct(_) => {
+                    let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
+                    if ret_ty == CTy::Void {
+                        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+                        CValue::Scalar(0)
+                    } else {
+                        let ret = self.bb.func.0.next_local_var();
+                        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                            ret,
+                            ret_ty,
+                            Some(call),
+                        )));
+                        self.record_value_ty(ret, ret_ty);
+                        ret
+                    }
+                }
+                PassMode::Pair(_, _) => {
+                    let tuple_ty = self.abi_tuple_ty_for_pair_layout(fn_abi.ret.layout);
+                    let tuple = self.bb.func.0.next_local_var();
+                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                        tuple,
+                        tuple_ty,
+                        Some(call),
+                    )));
+                    self.record_value_ty(tuple, tuple_ty);
+
+                    let a = self.load_abi_tuple_field(tuple, tuple_ty, 0);
+                    let b = self.load_abi_tuple_field(tuple, tuple_ty, 1);
+                    let ret = self.bb.func.0.next_local_var();
+                    self.set_packed_pair_values(ret, a, b);
+                    ret
+                }
+                PassMode::Cast { ref cast, pad_i32: _ } => {
+                    let field_tys = self
+                        .cx
+                        .cast_target_to_c_abi_pieces(cast)
+                        .into_iter()
+                        .map(|(_, ty)| ty)
+                        .collect::<Vec<_>>();
+                    let tuple_ty = self.cx.abi_tuple_ty(&field_tys);
+                    let ret = self.bb.func.0.next_local_var();
+                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                        ret,
+                        tuple_ty,
+                        Some(call),
+                    )));
+                    self.record_value_ty(ret, tuple_ty);
+                    ret
+                }
+            };
         }
 
+        let (ret_ty, expected_callee_ty) = self.call_signature_from_ty(llty);
         let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
         let mut callee = llfn;
         if instance
@@ -1753,67 +1846,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             }
         }
 
-        let expected_callee_ty = self.cx.fn_ptr_backend_type(fn_abi);
         let callee_expr = match callee {
             CValue::Func(_) => self.mcx.value(callee),
             _ => self.mcx.cast(expected_callee_ty, self.mcx.value(callee)),
         };
-
         let call = self.mcx.call(callee_expr, args);
-        match fn_abi.ret.mode {
-            PassMode::Ignore | PassMode::Indirect { .. } => {
-                self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
-                CValue::Scalar(0)
-            }
-            PassMode::Direct(_) => {
-                let ret_ty = self.cx.immediate_backend_type(fn_abi.ret.layout);
-                if ret_ty == CTy::Void {
-                    self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
-                    CValue::Scalar(0)
-                } else {
-                    let ret = self.bb.func.0.next_local_var();
-                    self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
-                        ret,
-                        ret_ty,
-                        Some(call),
-                    )));
-                    self.record_value_ty(ret, ret_ty);
-                    ret
-                }
-            }
-            PassMode::Pair(_, _) => {
-                let tuple_ty = self.abi_tuple_ty_for_pair_layout(fn_abi.ret.layout);
-                let tuple = self.bb.func.0.next_local_var();
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
-                    tuple,
-                    tuple_ty,
-                    Some(call),
-                )));
-                self.record_value_ty(tuple, tuple_ty);
-
-                let a = self.load_abi_tuple_field(tuple, tuple_ty, 0);
-                let b = self.load_abi_tuple_field(tuple, tuple_ty, 1);
-                let ret = self.bb.func.0.next_local_var();
-                self.set_packed_pair_values(ret, a, b);
-                ret
-            }
-            PassMode::Cast { ref cast, pad_i32: _ } => {
-                let field_tys = self
-                    .cx
-                    .cast_target_to_c_abi_pieces(cast)
-                    .into_iter()
-                    .map(|(_, ty)| ty)
-                    .collect::<Vec<_>>();
-                let tuple_ty = self.cx.abi_tuple_ty(&field_tys);
-                let ret = self.bb.func.0.next_local_var();
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
-                    ret,
-                    tuple_ty,
-                    Some(call),
-                )));
-                self.record_value_ty(ret, tuple_ty);
-                ret
-            }
+        if ret_ty == CTy::Void {
+            self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+            CValue::Scalar(0)
+        } else {
+            let ret = self.bb.func.0.next_local_var();
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(call))));
+            self.record_value_ty(ret, ret_ty);
+            ret
         }
     }
 
