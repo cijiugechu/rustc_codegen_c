@@ -1,0 +1,12 @@
+HARNESS|BEGIN|harness_trace
+HARNESS|STATE|a|5
+HARNESS|STATE|b|10
+HARNESS|STATE|a less than b|true
+HARNESS|STATE|marker|U+005A
+HARNESS|STATE|series|[1, 2, 3]
+HARNESS|PASS|a should be 5
+HARNESS|PASS|b should be 10
+HARNESS|PASS|a less than b
+HARNESS|PASS|marker should be Z
+HARNESS|PASS|series[2] should be 3
+HARNESS|SUMMARY|pass=5|fail=0
