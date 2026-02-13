@@ -307,6 +307,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.value_ty(ptr).and_then(|ty| match ty {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(elem) | CTyKind::Array(elem, _) => Some(*elem),
+                CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) => None,
             },
             _ => None,
@@ -383,6 +384,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
                     self.update_ptr_pointee_ty(ptr, *elem)
                 }
+                CTyKind::Function { .. } => {}
                 CTyKind::Struct(_) => {}
             }
         }
@@ -420,6 +422,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => Some(self.tcx.data_layout.pointer_size().bytes() as usize),
                 CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
+                CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) => self.struct_layout_info(ty).map(|info| info.size),
             },
             _ => None,
@@ -1201,6 +1204,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                         CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
                             projected_ty = *elem;
                         }
+                        CTyKind::Function { .. } => {
+                            panic!("gep cannot project into function type")
+                        }
                         CTyKind::Struct(_) => {}
                     }
                 }
@@ -1227,6 +1233,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                         };
                         expr = self.mcx.index(expr, idx_expr);
                         *elem
+                    }
+                    CTyKind::Function { .. } => {
+                        panic!("gep cannot index function type")
                     }
                     CTyKind::Struct(_) => {
                         let index = const_index.unwrap_or_else(|| {
@@ -1715,8 +1724,6 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
-        use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
-
         let fn_abi = fn_abi.unwrap();
 
         if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
@@ -1746,7 +1753,13 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             }
         }
 
-        let call = self.mcx.call(self.mcx.value(callee), args);
+        let expected_callee_ty = self.cx.fn_ptr_backend_type(fn_abi);
+        let callee_expr = match callee {
+            CValue::Func(_) => self.mcx.value(callee),
+            _ => self.mcx.cast(expected_callee_ty, self.mcx.value(callee)),
+        };
+
+        let call = self.mcx.call(callee_expr, args);
         match fn_abi.ret.mode {
             PassMode::Ignore | PassMode::Indirect { .. } => {
                 self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));

@@ -3,8 +3,8 @@ use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
-use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
-use rustc_middle::ty::Ty;
+use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
+use rustc_middle::ty::{self, Ty};
 use rustc_target::callconv::FnAbi;
 use rustc_type_ir::TyKind;
 
@@ -253,11 +253,13 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
-        CTy::Void
+        let (ret, params) = self.fn_abi_to_c_signature(fn_abi);
+        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Function { ret, params })))
     }
 
     fn fn_ptr_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
-        todo!()
+        let fn_ty = self.fn_decl_backend_type(fn_abi);
+        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(fn_ty))))
     }
 
     fn reg_backend_type(&self, ty: &rustc_abi::Reg) -> Self::Type {
@@ -273,6 +275,12 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type {
         if matches!(layout.ty.kind(), TyKind::Bool) {
             return CTy::Bool;
+        }
+
+        if let TyKind::FnPtr(sig_tys, hdr) = layout.ty.kind() {
+            let sig = sig_tys.with(*hdr);
+            let fn_abi = self.fn_abi_of_fn_ptr(sig, ty::List::empty());
+            return self.fn_ptr_backend_type(fn_abi);
         }
 
         match layout.ty.kind() {

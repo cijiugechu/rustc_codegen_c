@@ -160,7 +160,20 @@ impl Print for CExpr<'_> {
                 expr.print_to(ctx);
             }),
             CExprKind::Call { callee, args } => ctx.ibox(INDENT, |ctx| {
-                callee.print_to(ctx);
+                let need_callee_parens = matches!(
+                    callee,
+                    CExprKind::Binary { .. }
+                        | CExprKind::Ternary { .. }
+                        | CExprKind::Cast { .. }
+                        | CExprKind::Unary { .. }
+                );
+                if need_callee_parens {
+                    ctx.word("(");
+                    callee.print_to(ctx);
+                    ctx.word(")");
+                } else {
+                    callee.print_to(ctx);
+                }
                 ctx.cbox_delim(INDENT, ("(", ")"), 0, |ctx| {
                     ctx.seperated(",", args, |ctx, arg| arg.print_to(ctx));
                 });

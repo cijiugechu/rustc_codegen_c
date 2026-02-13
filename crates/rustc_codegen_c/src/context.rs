@@ -20,7 +20,7 @@ use rustc_middle::ty::layout::{
     TyAndLayout,
 };
 use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty, TyCtxt};
-use rustc_target::callconv::FnAbi;
+use rustc_target::callconv::{FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 use rustc_type_ir::TyKind;
 
@@ -72,6 +72,7 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     UInt(CUintTy),
     Pointer(Box<AbiTupleFieldKey<'mx>>),
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
+    Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
     Struct(&'mx str),
 }
 
@@ -284,6 +285,58 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         out
     }
 
+    fn thin_ptr_u8_ty(&self) -> CTy<'mx> {
+        CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+        ))
+    }
+
+    pub(crate) fn fn_abi_to_c_signature(
+        &self,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+    ) -> (CTy<'mx>, Vec<CTy<'mx>>) {
+        let mut args = Vec::new();
+        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
+            args.push(self.indirect_ptr_ty_for_layout(fn_abi.ret.layout));
+        }
+        for arg in fn_abi.args.iter() {
+            match arg.mode {
+                PassMode::Ignore => {}
+                PassMode::Direct(_) => args.push(self.immediate_backend_type(arg.layout)),
+                PassMode::Pair(_, _) => {
+                    args.push(self.scalar_pair_element_backend_type(arg.layout, 0, true));
+                    args.push(self.scalar_pair_element_backend_type(arg.layout, 1, true));
+                }
+                PassMode::Cast { ref cast, pad_i32 } => {
+                    if pad_i32 {
+                        args.push(CTy::UInt(CUintTy::U32));
+                    }
+                    args.extend(
+                        self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty),
+                    );
+                }
+                PassMode::Indirect { meta_attrs: None, .. } => {
+                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
+                }
+                PassMode::Indirect { meta_attrs: Some(_), .. } => {
+                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
+                    args.push(self.thin_ptr_u8_ty());
+                }
+            }
+        }
+
+        let ret = match fn_abi.ret.mode {
+            PassMode::Ignore | PassMode::Indirect { .. } => CTy::Void,
+            PassMode::Direct(_) => self.immediate_backend_type(fn_abi.ret.layout),
+            PassMode::Pair(_, _) => self.abi_tuple_ty(&[
+                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 0, true),
+                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 1, true),
+            ]),
+            PassMode::Cast { ref cast, pad_i32: _ } => self.cast_backend_type(cast),
+        };
+        (ret, args)
+    }
+
     pub(crate) fn abi_tuple_ty(&self, fields: &[CTy<'mx>]) -> CTy<'mx> {
         let key = fields
             .iter()
@@ -363,6 +416,14 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 CTyKind::Array(elem, len) => {
                     AbiTupleFieldKey::Array(Box::new(self.abi_tuple_field_key(*elem)), *len)
                 }
+                CTyKind::Function { ret, params } => AbiTupleFieldKey::Function {
+                    ret: Box::new(self.abi_tuple_field_key(*ret)),
+                    params: params
+                        .iter()
+                        .copied()
+                        .map(|param| self.abi_tuple_field_key(param))
+                        .collect(),
+                },
                 CTyKind::Struct(name) => AbiTupleFieldKey::Struct(name),
             },
         }
@@ -404,6 +465,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     let (elem_size, elem_align) = self.c_ty_size_align(*elem)?;
                     Some((elem_size.saturating_mul(*count), elem_align))
                 }
+                CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) => {
                     let info = self.struct_layouts.borrow().get(&ty)?.clone();
                     Some((info.size, info.align))

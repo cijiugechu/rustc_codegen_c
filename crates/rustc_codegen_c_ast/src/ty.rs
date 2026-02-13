@@ -90,6 +90,10 @@ impl<'mx> CTy<'mx> {
     pub fn is_array(&self) -> bool {
         matches!(self, CTy::Ref(Interned(CTyKind::Array(_, _), _)))
     }
+
+    pub fn is_function(&self) -> bool {
+        matches!(self, CTy::Ref(Interned(CTyKind::Function { .. }, _)))
+    }
 }
 
 /// C primitive types.
@@ -180,6 +184,8 @@ pub enum CTyKind<'mx> {
     Pointer(CTy<'mx>),
     /// An array type with element type and size.
     Array(CTy<'mx>, usize),
+    /// A function type with return type and parameter types.
+    Function { ret: CTy<'mx>, params: Vec<CTy<'mx>> },
     /// A struct type by name.
     Struct(&'mx str),
 }
@@ -225,6 +231,7 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
         Ident(CValue<'mx>),
         Ptr,
         ArrayDim(usize),
+        FuncParams(Vec<CTy<'mx>>),
         Lp,
         Rp,
     }
@@ -241,6 +248,17 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                 DeclaratorPart::ArrayDim(dim) => {
                     ctx.word(format!("[{}]", dim));
                 }
+                DeclaratorPart::FuncParams(params) => {
+                    ctx.word("(");
+                    if params.is_empty() {
+                        ctx.word("void");
+                    } else {
+                        ctx.seperated(",", params, |ctx, ty| {
+                            print_declarator(*ty, None, ctx);
+                        });
+                    }
+                    ctx.word(")");
+                }
                 DeclaratorPart::Lp => ctx.word("("),
                 DeclaratorPart::Rp => ctx.word(")"),
             }
@@ -256,7 +274,7 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(inner) => {
                     decl_parts.push_front(DeclaratorPart::Ptr);
-                    if inner.is_array() {
+                    if inner.is_array() || inner.is_function() {
                         decl_parts.push_front(DeclaratorPart::Lp);
                         decl_parts.push_back(DeclaratorPart::Rp);
                     }
@@ -265,6 +283,10 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                 CTyKind::Array(inner, dim) => {
                     decl_parts.push_back(DeclaratorPart::ArrayDim(*dim));
                     ty = *inner;
+                }
+                CTyKind::Function { ret, params } => {
+                    decl_parts.push_back(DeclaratorPart::FuncParams(params.clone()));
+                    ty = *ret;
                 }
                 CTyKind::Struct(name) => break format!("struct {name}"),
             },
@@ -374,5 +396,38 @@ mod tests {
         let val = CValue::Local(4);
         print_declarator(array_of_ptrs_type, Some(val), &mut ctx);
         assert_eq!(ctx.finish(), "int32_t (*_4[3])[5]");
+    }
+
+    #[test]
+    fn test_print_declarator_fn_pointer() {
+        let mut ctx = setup_printer_ctx();
+        let fn_kind =
+            CTyKind::Function { ret: CTy::Int(CIntTy::I32), params: vec![CTy::Int(CIntTy::I32)] };
+        let fn_ty = CTy::Ref(Interned::new_unchecked(&fn_kind));
+        let fn_ptr_kind = CTyKind::Pointer(fn_ty);
+        let fn_ptr_ty = CTy::Ref(Interned::new_unchecked(&fn_ptr_kind));
+
+        print_declarator(fn_ptr_ty, None, &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t (*)(int32_t)");
+
+        ctx = setup_printer_ctx();
+        let val = CValue::Local(0);
+        print_declarator(fn_ptr_ty, Some(val), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t (*_0)(int32_t)");
+    }
+
+    #[test]
+    fn test_print_declarator_fn_pointer_in_array() {
+        let mut ctx = setup_printer_ctx();
+        let fn_kind = CTyKind::Function { ret: CTy::Int(CIntTy::I32), params: vec![] };
+        let fn_ty = CTy::Ref(Interned::new_unchecked(&fn_kind));
+        let fn_ptr_kind = CTyKind::Pointer(fn_ty);
+        let fn_ptr_ty = CTy::Ref(Interned::new_unchecked(&fn_ptr_kind));
+        let array_kind = CTyKind::Array(fn_ptr_ty, 2);
+        let array_ty = CTy::Ref(Interned::new_unchecked(&array_kind));
+        let val = CValue::Local(7);
+
+        print_declarator(array_ty, Some(val), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t (*_7[2])(void)");
     }
 }

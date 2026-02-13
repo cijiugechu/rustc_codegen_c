@@ -75,15 +75,15 @@ impl Print for Module<'_> {
                 def.print_to(ctx);
             }
 
+            for &func in self.funcs.borrow().iter() {
+                ctx.hardbreak();
+                print_func_decl(func, ctx);
+            }
+
             for &decl in self.decls.borrow().iter() {
                 ctx.hardbreak();
                 ctx.hardbreak();
                 decl.print_to(ctx);
-            }
-
-            for &func in self.funcs.borrow().iter() {
-                ctx.hardbreak();
-                print_func_decl(func, ctx);
             }
 
             for &func in self.funcs.borrow().iter() {

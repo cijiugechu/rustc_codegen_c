@@ -52,7 +52,9 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_func(&self, args: &[Self::Type], ret: Self::Type) -> Self::Type {
-        todo!()
+        CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Function { ret, params: args.to_vec() }),
+        ))
     }
 
     fn type_kind(&self, ty: Self::Type) -> rustc_codegen_ssa::common::TypeKind {
@@ -64,6 +66,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => rustc_codegen_ssa::common::TypeKind::Pointer,
                 CTyKind::Array(_, _) => rustc_codegen_ssa::common::TypeKind::Array,
+                CTyKind::Function { .. } => rustc_codegen_ssa::common::TypeKind::Function,
                 CTyKind::Struct(_) => rustc_codegen_ssa::common::TypeKind::Struct,
             },
         }
@@ -83,6 +86,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
         match ty {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(inner) | CTyKind::Array(inner, _) => *inner,
+                CTyKind::Function { .. } => panic!("function has no scalar element type"),
                 CTyKind::Struct(_) => panic!("struct has no scalar element type"),
             },
             _ => panic!("not an aggregate type: {ty:?}"),

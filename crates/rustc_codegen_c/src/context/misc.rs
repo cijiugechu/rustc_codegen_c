@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 
-use crate::rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::{CFunc, CFuncKind};
 use rustc_codegen_c_ast::ty::{CIntTy, CTy};
@@ -10,7 +9,6 @@ use rustc_hash::FxHashMap;
 use rustc_middle::ty::layout::{FnAbiOf, HasTypingEnv};
 use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
 use rustc_span::DUMMY_SP;
-use rustc_target::callconv::PassMode;
 
 use crate::context::CodegenCx;
 
@@ -57,53 +55,7 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         }
 
         let fn_abi = self.fn_abi_of_instance(instance, rustc_middle::ty::List::empty());
-        let mut args = Vec::new();
-        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
-            args.push(self.indirect_ptr_ty_for_layout(fn_abi.ret.layout));
-        }
-        for arg in fn_abi.args.iter() {
-            match arg.mode {
-                PassMode::Ignore => {}
-                PassMode::Direct(_) => args.push(self.immediate_backend_type(arg.layout)),
-                PassMode::Pair(_, _) => {
-                    args.push(self.scalar_pair_element_backend_type(arg.layout, 0, true));
-                    args.push(self.scalar_pair_element_backend_type(arg.layout, 1, true));
-                }
-                PassMode::Cast { ref cast, pad_i32 } => {
-                    if pad_i32 {
-                        args.push(rustc_codegen_c_ast::ty::CTy::UInt(
-                            rustc_codegen_c_ast::ty::CUintTy::U32,
-                        ));
-                    }
-                    args.extend(
-                        self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty),
-                    );
-                }
-                PassMode::Indirect { meta_attrs: None, .. } => {
-                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
-                }
-                PassMode::Indirect { meta_attrs: Some(_), .. } => {
-                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
-                    args.push(rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(
-                        self.mcx.arena().alloc(rustc_codegen_c_ast::ty::CTyKind::Pointer(
-                            rustc_codegen_c_ast::ty::CTy::UInt(
-                                rustc_codegen_c_ast::ty::CUintTy::U8,
-                            ),
-                        )),
-                    )));
-                }
-            }
-        }
-
-        let mut ret = match fn_abi.ret.mode {
-            PassMode::Ignore | PassMode::Indirect { .. } => rustc_codegen_c_ast::ty::CTy::Void,
-            PassMode::Direct(_) => self.immediate_backend_type(fn_abi.ret.layout),
-            PassMode::Pair(_, _) => self.abi_tuple_ty(&[
-                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 0, true),
-                self.scalar_pair_element_backend_type(fn_abi.ret.layout, 1, true),
-            ]),
-            PassMode::Cast { ref cast, pad_i32: _ } => self.cast_backend_type(cast),
-        };
+        let (mut ret, mut args) = self.fn_abi_to_c_signature(fn_abi);
 
         let symbol_name = sanitize_symbol_name(self.tcx.symbol_name(instance).name);
         let is_printf = symbol_name == "printf";
