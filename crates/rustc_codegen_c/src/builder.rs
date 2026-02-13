@@ -310,11 +310,17 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 let info = self
                     .struct_layout_info(struct_ty)
                     .unwrap_or_else(|| panic!("missing struct layout metadata for {struct_ty:?}"));
-                if info.repr_c {
-                    struct_ty
+                if slot.bytes % info.size == 0 {
+                    CTy::Ref(Interned::new_unchecked(
+                        self.mcx
+                            .arena()
+                            .alloc(CTyKind::Array(struct_ty, (slot.bytes / info.size).max(1))),
+                    ))
                 } else {
                     CTy::Ref(Interned::new_unchecked(
-                        self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), info.size)),
+                        self.mcx
+                            .arena()
+                            .alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), slot.bytes.max(1))),
                     ))
                 }
             }
@@ -824,7 +830,37 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> (Self::Value, Self::Value) {
-        todo!()
+        let ty = match ty.kind() {
+            rustc_type_ir::TyKind::Int(int) => self.mcx.get_int_type(*int),
+            rustc_type_ir::TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
+            _ => panic!("checked_binop expects integer type, got {ty:?}"),
+        };
+
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+
+        let result = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(result, ty, None)));
+        self.record_value_ty(result, ty);
+
+        let overflow = self.bb.func.0.next_local_var();
+        let overflow_builtin = match oop {
+            rustc_codegen_ssa::traits::OverflowOp::Add => "__builtin_add_overflow",
+            rustc_codegen_ssa::traits::OverflowOp::Sub => "__builtin_sub_overflow",
+            rustc_codegen_ssa::traits::OverflowOp::Mul => "__builtin_mul_overflow",
+        };
+        let result_ptr =
+            self.mcx.cast(self.pointer_to(ty), self.mcx.unary("&", self.mcx.value(result)));
+        let overflow_expr =
+            self.mcx.call(self.mcx.raw(overflow_builtin), vec![lhs, rhs, result_ptr]);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            overflow,
+            CTy::Bool,
+            Some(overflow_expr),
+        )));
+        self.record_value_ty(overflow, CTy::Bool);
+
+        (result, overflow)
     }
 
     fn from_immediate(&mut self, val: Self::Value) -> Self::Value {
@@ -961,20 +997,36 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         align: rustc_abi::Align,
     ) -> Self::Value {
-        let store_ty = self
-            .value_ty(val)
+        let val_ty = self.value_ty(val);
+        let normalized_val_ty = val_ty.and_then(|ty| match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Array(elem, 1) => Some(*elem),
+                _ => Some(ty),
+            },
+            _ => Some(ty),
+        });
+        let store_ty = normalized_val_ty
             .or_else(|| self.pointer_pointee_ty(ptr))
             .or_else(|| self.infer_store_ty_from_pending_alloca(ptr, align))
             .unwrap_or_else(|| self.fallback_store_ty_from_align(align));
         self.ensure_alloca_decl(ptr, Some(store_ty));
         let lhs = if let Some(lvalue) = self.pointer_lvalue(ptr) {
-            lvalue
+            match self.pointer_pointee_ty(ptr) {
+                Some(pointee) if pointee == store_ty => lvalue,
+                _ => {
+                    let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
+                    self.mcx.unary("*", cast_ptr)
+                }
+            }
         } else {
             let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
             self.mcx.unary("*", cast_ptr)
         };
-        let rhs = match self.value_ty(val) {
+        let rhs = match val_ty {
             Some(val_ty) if val_ty == store_ty => self.mcx.value(val),
+            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(elem, 1) if *elem == store_ty) => {
+                self.mcx.index(self.mcx.value(val), self.mcx.value(CValue::Scalar(0)))
+            }
             Some(_) => self.mcx.cast(store_ty, self.mcx.value(val)),
             None => self.mcx.value(val),
         };
@@ -1005,6 +1057,21 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
         let mut expr = self.mcx.value(ptr);
+        if let Some(CTy::Ref(kind)) = self.value_ty(ptr) {
+            if matches!(kind.0, CTyKind::Struct(_)) && ty != CTy::Ref(kind) {
+                let cast_ptr_ty = self.pointer_to(ty);
+                let cast_ptr = self.bb.func.0.next_local_var();
+                let addr = self.mcx.unary("&", self.mcx.value(ptr));
+                let cast = self.mcx.cast(cast_ptr_ty, addr);
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                    cast_ptr,
+                    cast_ptr_ty,
+                    Some(cast),
+                )));
+                self.record_value_ty(cast_ptr, cast_ptr_ty);
+                expr = self.mcx.value(cast_ptr);
+            }
+        }
         if let Some(pointee) = self.pointer_pointee_ty(ptr) {
             if pointee != ty {
                 let cast_ptr_ty = self.pointer_to(ty);
@@ -1070,27 +1137,17 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                             .get(index)
                             .cloned()
                             .unwrap_or_else(|| panic!("invalid struct field index {index}"));
-                        expr = if info.repr_c {
-                            if i == 1 {
-                                self.mcx.member_arrow(expr, field.name)
-                            } else {
-                                self.mcx.member(expr, field.name)
-                            }
+                        let byte_ptr = self.pointer_to(CTy::UInt(CUintTy::U8));
+                        let base = self.mcx.cast(byte_ptr, self.mcx.unary("&", expr));
+                        let addr = if field.offset == 0 {
+                            base
                         } else {
-                            let byte_ptr = self.pointer_to(CTy::UInt(CUintTy::U8));
-                            let base = self.mcx.cast(byte_ptr, expr);
-                            let addr = if field.offset == 0 {
-                                base
-                            } else {
-                                self.mcx.index(
-                                    base,
-                                    self.mcx.value(CValue::Scalar(field.offset as i128)),
-                                )
-                            };
-                            let field_ptr = self.pointer_to(field.ty);
-                            let typed_ptr = self.mcx.cast(field_ptr, addr);
-                            self.mcx.unary("*", typed_ptr)
+                            self.mcx
+                                .index(base, self.mcx.value(CValue::Scalar(field.offset as i128)))
                         };
+                        let field_ptr = self.pointer_to(field.ty);
+                        let typed_ptr = self.mcx.cast(field_ptr, addr);
+                        expr = self.mcx.unary("*", typed_ptr);
                         field.ty
                     }
                 },
@@ -1122,7 +1179,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 )))
             })
         });
-        self.ensure_alloca_decl(ptr, inferred_decl_ty.or(Some(ty)));
+        let suggested_decl_ty = match ty {
+            CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)) => Some(ty),
+            _ => inferred_decl_ty.or(Some(ty)),
+        };
+        self.ensure_alloca_decl(ptr, suggested_decl_ty);
 
         let ret = self.bb.func.0.next_local_var();
         let ret_ty = self.pointer_to(projected_ty);
@@ -1473,7 +1534,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn resume(&mut self, exn0: Self::Value, exn1: Self::Value) {
-        todo!()
+        let _ = (exn0, exn1);
+        self.unreachable();
     }
 
     fn cleanup_pad(&mut self, parent: Option<Self::Value>, args: &[Self::Value]) -> Self::Funclet {

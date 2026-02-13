@@ -99,7 +99,7 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 }
             }
         }
-        let ret = match fn_abi.ret.mode {
+        let mut ret = match fn_abi.ret.mode {
             PassMode::Ignore | PassMode::Indirect { .. } => rustc_codegen_c_ast::ty::CTy::Void,
             PassMode::Direct(_) => self.immediate_backend_type(fn_abi.ret.layout),
             PassMode::Pair(_, _) => self.abi_tuple_ty(&[
@@ -109,10 +109,32 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             PassMode::Cast { ref cast, pad_i32: _ } => self.cast_backend_type(cast),
         };
 
+        if symbol_name == "malloc" {
+            ret =
+                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
+                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
+                )));
+            args =
+                vec![rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize)];
+        } else if symbol_name == "free" {
+            ret = rustc_codegen_c_ast::ty::CTy::Void;
+            args = vec![rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(rustc_codegen_c_ast::ty::CTyKind::Pointer(
+                    rustc_codegen_c_ast::ty::CTy::Void,
+                )),
+            ))];
+        } else if symbol_name == "printf" {
+            ret = rustc_codegen_c_ast::ty::CTy::Int(rustc_codegen_c_ast::ty::CIntTy::I32);
+            args = vec![];
+        }
+
+        let is_printf = symbol_name == "printf";
         let symbol_name = sanitize_symbol_name(symbol_name);
         let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args);
         let func = Interned::new_unchecked(self.mcx.func(func));
-        self.mcx.module().push_func(func);
+        if !is_printf {
+            self.mcx.module().push_func(func);
+        }
         self.function_instances.borrow_mut().insert(instance, func);
     }
 }

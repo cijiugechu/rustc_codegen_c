@@ -1,7 +1,8 @@
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::ty::CTy;
+use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::ConstCodegenMethods;
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
+use rustc_data_structures::intern::Interned;
 use rustc_middle::mir::interpret::GlobalAlloc;
 use rustc_type_ir::{IntTy, UintTy};
 
@@ -85,7 +86,14 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     pub(crate) fn const_bytes_pointer(&self, bytes: &[u8]) -> CValue<'mx> {
         let literal = c_string_literal_from_bytes(bytes);
         let expr = self.mcx.alloc_str(&format!("((uint8_t *){literal})"));
-        CValue::Func(expr)
+        let value = CValue::Func(expr);
+        if let Some(fkey) = self.current_fkey.get() {
+            let ptr_ty = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+            ));
+            self.value_tys.borrow_mut().insert((fkey, value), ptr_ty);
+        }
+        value
     }
 
     pub(crate) fn symbol_value(&self, symbol_name: &str) -> CValue<'mx> {
@@ -210,7 +218,9 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
                         let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));
                         CValue::Func(expr)
                     }
-                    GlobalAlloc::VTable(..) | GlobalAlloc::TypeId { .. } => self.typed_scalar(0, llty),
+                    GlobalAlloc::VTable(..) | GlobalAlloc::TypeId { .. } => {
+                        self.typed_scalar(0, llty)
+                    }
                 };
                 self.const_ptr_byte_offset(base, offset)
             }

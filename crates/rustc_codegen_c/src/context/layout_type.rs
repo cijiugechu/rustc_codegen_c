@@ -35,6 +35,22 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         }
     }
 
+    fn ptr_backend_type_for_ty(&self, ty: Ty<'tcx>) -> CTy<'mx> {
+        let pointee = if ty.builtin_deref(true).is_some_and(|mt| {
+            if let TyKind::Adt(adt_def, _) = mt.kind() {
+                self.tcx.item_name(adt_def.did()).as_str() == "c_void"
+            } else {
+                false
+            }
+        }) {
+            CTy::Void
+        } else {
+            CTy::UInt(CUintTy::U8)
+        };
+
+        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
+    }
+
     pub(crate) fn define_simple_struct_layout(
         &self,
         layout: TyAndLayout<'tcx>,
@@ -49,23 +65,23 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             panic!("only struct ADTs are supported, got {}", adt_def.descr());
         }
 
-        let name = self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str());
+        let name = if adt_def.repr().c() && args.is_empty() {
+            self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str())
+        } else {
+            self.mcx.alloc_str(&format!("__rcgenc_struct_{}", self.struct_layouts.borrow().len()))
+        };
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
 
         let variant = adt_def.non_enum_variant();
         let mut fields = Vec::with_capacity(variant.fields.len());
         for (i, field) in variant.fields.iter().enumerate() {
             let field_name = self.mcx.alloc_str(field.name.as_str());
-            let field_ty = field.ty(self.tcx, args);
             let field_layout = layout.field(&*self, i);
-            let field_cty = self.immediate_backend_type(field_layout);
-            match field_cty {
-                CTy::Bool | CTy::Int(_) | CTy::UInt(_) => {}
-                _ => panic!("only primitive scalar fields are supported in simple struct mode"),
-            }
-            if matches!(field_ty.kind(), TyKind::Adt(..)) {
-                panic!("nested struct fields are not supported yet");
-            }
+            let field_cty = if field_layout.size.bytes() == 0 {
+                CTy::UInt(CUintTy::U8)
+            } else {
+                self.backend_type(field_layout)
+            };
             fields.push(AdtFieldLayout {
                 index: i,
                 name: field_name,
@@ -205,6 +221,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 }
             }
             TyKind::Tuple(..) => self.define_tuple_layout(layout),
+            TyKind::Ref(..) | TyKind::RawPtr(..) => self.immediate_backend_type(layout),
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
     }
@@ -257,9 +274,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             TyKind::Int(int) => self.mcx.get_int_type(*int),
             TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
             TyKind::Never => CTy::Void,
-            TyKind::Ref(..) | TyKind::RawPtr(..) => CTy::Ref(Interned::new_unchecked(
-                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
-            )),
+            TyKind::Ref(..) | TyKind::RawPtr(..) => self.ptr_backend_type_for_ty(layout.ty),
             _ => todo!("unsupported immediate_backend_type: {:?}", layout.ty.kind()),
         }
     }

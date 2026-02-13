@@ -273,16 +273,95 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let mut field_names = Vec::with_capacity(fields.len());
         let mut struct_fields = Vec::with_capacity(fields.len());
+        let mut layout_fields = Vec::with_capacity(fields.len());
+        let mut offset = 0usize;
+        let mut struct_align = 1usize;
         for (i, field_ty) in fields.iter().copied().enumerate() {
             let field_name = self.mcx.alloc_str(&format!("f{i}"));
             field_names.push(field_name);
             struct_fields.push(CStructField { name: field_name, ty: field_ty });
+
+            let (field_size, field_align) = self.c_ty_size_align(field_ty).unwrap_or_else(|| {
+                panic!("missing size/alignment for ABI tuple field type {field_ty:?}")
+            });
+            if field_align > 1 {
+                offset = (offset + (field_align - 1)) & !(field_align - 1);
+            }
+            layout_fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: field_ty,
+                offset,
+                size: field_size,
+            });
+            offset += field_size;
+            struct_align = struct_align.max(field_align);
         }
+
+        let struct_size = if struct_align > 1 {
+            (offset + (struct_align - 1)) & !(struct_align - 1)
+        } else {
+            offset
+        };
+
         self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
+        self.struct_layouts.borrow_mut().insert(
+            ty,
+            AdtLayoutInfo {
+                size: struct_size,
+                align: struct_align,
+                repr_c: true,
+                fields: layout_fields,
+            },
+        );
         self.abi_tuple_structs.borrow_mut().insert(fields.to_vec(), ty);
         self.abi_tuple_fields.borrow_mut().insert(ty, field_names);
         self.abi_tuple_field_tys.borrow_mut().insert(ty, fields.to_vec());
         ty
+    }
+
+    fn c_ty_size_align(&self, ty: CTy<'mx>) -> Option<(usize, usize)> {
+        match ty {
+            CTy::Void => Some((0, 1)),
+            CTy::Bool => Some((1, 1)),
+            CTy::Char => Some((1, 1)),
+            CTy::Int(int) => {
+                let bytes = match int {
+                    rustc_codegen_c_ast::ty::CIntTy::I8 => 1,
+                    rustc_codegen_c_ast::ty::CIntTy::I16 => 2,
+                    rustc_codegen_c_ast::ty::CIntTy::I32 => 4,
+                    rustc_codegen_c_ast::ty::CIntTy::I64 => 8,
+                    rustc_codegen_c_ast::ty::CIntTy::Isize => {
+                        self.tcx.data_layout.pointer_size().bytes() as usize
+                    }
+                };
+                Some((bytes, bytes))
+            }
+            CTy::UInt(int) => {
+                let bytes = match int {
+                    CUintTy::U8 => 1,
+                    CUintTy::U16 => 2,
+                    CUintTy::U32 => 4,
+                    CUintTy::U64 => 8,
+                    CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
+                };
+                Some((bytes, bytes))
+            }
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(_) => {
+                    let bytes = self.tcx.data_layout.pointer_size().bytes() as usize;
+                    Some((bytes, bytes))
+                }
+                CTyKind::Array(elem, count) => {
+                    let (elem_size, elem_align) = self.c_ty_size_align(*elem)?;
+                    Some((elem_size.saturating_mul(*count), elem_align))
+                }
+                CTyKind::Struct(_) => {
+                    let info = self.struct_layouts.borrow().get(&ty)?.clone();
+                    Some((info.size, info.align))
+                }
+            },
+        }
     }
 
     pub(crate) fn abi_tuple_field_name(&self, tuple_ty: CTy<'mx>, idx: usize) -> &'mx str {

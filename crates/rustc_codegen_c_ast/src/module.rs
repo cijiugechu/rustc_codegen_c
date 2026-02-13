@@ -87,6 +87,9 @@ impl Print for Module<'_> {
             }
 
             for &func in self.funcs.borrow().iter() {
+                if func.0.body.borrow().is_empty() && func.0.name != "rust_eh_personality" {
+                    continue;
+                }
                 ctx.hardbreak();
                 ctx.hardbreak();
                 func.print_to(ctx);

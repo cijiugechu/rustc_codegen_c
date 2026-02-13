@@ -14,6 +14,7 @@ extern crate rustc_metadata;
 extern crate rustc_middle;
 extern crate rustc_session;
 extern crate rustc_span;
+extern crate rustc_symbol_mangling;
 extern crate rustc_target;
 extern crate rustc_type_ir;
 extern crate tracing;
@@ -41,6 +42,7 @@ use rustc_middle::util::Providers;
 use rustc_session::config::{OptLevel, OutputFilenames};
 use rustc_session::Session;
 
+mod allocator;
 mod archive;
 mod base;
 mod builder;
@@ -141,12 +143,12 @@ impl ExtraBackendMethods for CCodegen {
 
     fn codegen_allocator(
         &self,
-        _tcx: TyCtxt<'_>,
-        _module_name: &str,
-        _kind: AllocatorKind,
-        _alloc_error_handler_kind: AllocatorKind,
+        tcx: TyCtxt<'_>,
+        module_name: &str,
+        kind: AllocatorKind,
+        alloc_error_handler_kind: AllocatorKind,
     ) -> Self::Module {
-        todo!()
+        allocator::codegen(tcx, module_name, kind, alloc_error_handler_kind)
     }
 
     fn compile_codegen_unit(
