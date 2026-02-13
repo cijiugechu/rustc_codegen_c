@@ -116,6 +116,17 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 )));
             args =
                 vec![rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize)];
+        } else if symbol_name == "realloc" {
+            ret =
+                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
+                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
+                )));
+            args = vec![
+                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
+                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
+                ))),
+                rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize),
+            ];
         } else if symbol_name == "free" {
             ret = rustc_codegen_c_ast::ty::CTy::Void;
             args = vec![rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(

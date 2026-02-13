@@ -10,6 +10,19 @@ use rustc_type_ir::TyKind;
 
 use crate::context::{AdtFieldLayout, AdtLayoutInfo, CodegenCx};
 
+fn is_valid_c_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     fn is_fieldless_enum(&self, adt_def: rustc_middle::ty::AdtDef<'tcx>) -> bool {
         adt_def.is_enum() && adt_def.variants().iter().all(|variant| variant.fields.is_empty())
@@ -68,14 +81,19 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         let name = if adt_def.repr().c() && args.is_empty() {
             self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str())
         } else {
-            self.mcx.alloc_str(&format!("__rcgenc_struct_{}", self.struct_layouts.borrow().len()))
+            self.mcx.alloc_str(&format!("__rcgenc_struct_{}", self.next_synthetic_type_id()))
         };
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
 
         let variant = adt_def.non_enum_variant();
         let mut fields = Vec::with_capacity(variant.fields.len());
         for (i, field) in variant.fields.iter().enumerate() {
-            let field_name = self.mcx.alloc_str(field.name.as_str());
+            let rust_name = field.name.as_str();
+            let field_name = if is_valid_c_identifier(rust_name) {
+                self.mcx.alloc_str(rust_name)
+            } else {
+                self.mcx.alloc_str(&format!("f{i}"))
+            };
             let field_layout = layout.field(&*self, i);
             let field_cty = if field_layout.size.bytes() == 0 {
                 CTy::UInt(CUintTy::U8)
@@ -104,11 +122,11 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         if layout_info.repr_c {
             self.struct_types.borrow_mut().insert(adt_def.did(), cty);
-            self.mcx.module().push_struct(CStructDef {
-                name,
-                fields: fields.iter().map(|f| CStructField { name: f.name, ty: f.ty }).collect(),
-            });
         }
+        self.mcx.module().push_struct(CStructDef {
+            name,
+            fields: fields.iter().map(|f| CStructField { name: f.name, ty: f.ty }).collect(),
+        });
 
         cty
     }
@@ -122,8 +140,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             panic!("expected tuple type, got {:?}", layout.ty.kind());
         };
 
-        let name =
-            self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.struct_layouts.borrow().len()));
+        let name = self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.next_synthetic_type_id()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
 
         let mut fields = Vec::with_capacity(fields_tys.len());
@@ -169,8 +186,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         let size = layout.size.bytes_usize();
         assert!(size > 0, "data enum with zero-sized layout is not supported: {:?}", layout.ty);
 
-        let name =
-            self.mcx.alloc_str(&format!("__rcgenc_enum_{}", self.struct_layouts.borrow().len()));
+        let name = self.mcx.alloc_str(&format!("__rcgenc_enum_{}", self.next_synthetic_type_id()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
         let mut fields = Vec::with_capacity(size);
         let mut struct_fields = Vec::with_capacity(size);

@@ -226,6 +226,46 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         }
     }
 
+    fn infer_unchecked_integer_binop_ty(
+        &self,
+        lhs: CValue<'mx>,
+        rhs: CValue<'mx>,
+        op: &str,
+    ) -> CTy<'mx> {
+        let ty = match (self.value_ty(lhs), self.value_ty(rhs)) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => lhs,
+            (Some(lhs), Some(rhs)) => self
+                .compatible_integer_result_ty(lhs, rhs)
+                .or_else(|| self.compatible_bitwise_result_ty(lhs, rhs))
+                .unwrap_or_else(|| panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}")),
+            (Some(lhs), None) => lhs,
+            (None, Some(rhs)) => rhs,
+            (None, None) => panic!("cannot infer operand type for {op}"),
+        };
+
+        match ty {
+            CTy::Int(_) | CTy::UInt(_) => ty,
+            _ => panic!("unsupported type for {op}: {ty:?}"),
+        }
+    }
+
+    fn codegen_unchecked_int_binop(
+        &mut self,
+        lhs: CValue<'mx>,
+        rhs: CValue<'mx>,
+        op_name: &str,
+        c_op: &'static str,
+    ) -> CValue<'mx> {
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, op_name);
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, c_op);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
+    }
+
     fn coerce_int_operand_expr(
         &self,
         value: CValue<'mx>,
@@ -592,7 +632,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let ty = self.infer_integer_binop_ty(lhs, rhs, "add");
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, "add");
         let ret = self.bb.func.0.next_local_var();
         let lhs = self.coerce_int_operand_expr(lhs, ty);
         let rhs = self.coerce_int_operand_expr(rhs, ty);
@@ -615,7 +655,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let ty = self.infer_integer_binop_ty(lhs, rhs, "sub");
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, "sub");
         let ret = self.bb.func.0.next_local_var();
         let lhs = self.coerce_int_operand_expr(lhs, ty);
         let rhs = self.coerce_int_operand_expr(rhs, ty);
@@ -638,7 +678,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let ty = self.infer_integer_binop_ty(lhs, rhs, "mul");
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, "mul");
         let ret = self.bb.func.0.next_local_var();
         let lhs = self.coerce_int_operand_expr(lhs, ty);
         let rhs = self.coerce_int_operand_expr(rhs, ty);
@@ -661,7 +701,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn udiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        let ty = self.infer_integer_binop_ty(lhs, rhs, "udiv");
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, "udiv");
         if !matches!(ty, CTy::UInt(_)) {
             panic!("unsupported type for udiv: {ty:?}");
         }
@@ -675,7 +715,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn exactudiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.udiv(lhs, rhs)
     }
 
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -693,7 +733,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn exactsdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.sdiv(lhs, rhs)
     }
 
     fn fdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -741,27 +781,27 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn unchecked_sadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_sadd", "+")
     }
 
     fn unchecked_uadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_uadd", "+")
     }
 
     fn unchecked_ssub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_ssub", "-")
     }
 
     fn unchecked_usub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_usub", "-")
     }
 
     fn unchecked_smul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_smul", "*")
     }
 
     fn unchecked_umul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_unchecked_int_binop(lhs, rhs, "unchecked_umul", "*")
     }
 
     fn and(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -1626,6 +1666,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             if matches!(abi_arg.mode, PassMode::Indirect { meta_attrs: None, .. }) {
                 self.ensure_alloca_decl(*value, Some(self.cx.backend_type(abi_arg.layout)));
             }
+        }
+        for value in args.iter().copied() {
+            self.ensure_alloca_byte_array_decl(value);
         }
 
         let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();

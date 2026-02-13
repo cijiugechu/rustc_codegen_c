@@ -9,7 +9,7 @@ use rustc_abi::{HasDataLayout, Reg, RegKind, Size, TargetDataLayout};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::func::CFunc;
-use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::{BackendTypes, LayoutTypeCodegenMethods};
 use rustc_hash::FxHashMap;
@@ -61,6 +61,18 @@ pub struct AdtLayoutInfo<'mx> {
     pub align: usize,
     pub repr_c: bool,
     pub fields: Vec<AdtFieldLayout<'mx>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum AbiTupleFieldKey<'mx> {
+    Void,
+    Bool,
+    Char,
+    Int(CIntTy),
+    UInt(CUintTy),
+    Pointer(Box<AbiTupleFieldKey<'mx>>),
+    Array(Box<AbiTupleFieldKey<'mx>>, usize),
+    Struct(&'mx str),
 }
 
 impl PartialEq for CBasicBlock<'_> {
@@ -115,11 +127,13 @@ pub struct CodegenCx<'tcx, 'mx> {
     /// Mapping from C struct marker type to computed layout metadata.
     pub struct_layouts: RefCell<FxHashMap<CTy<'mx>, AdtLayoutInfo<'mx>>>,
     /// Cache of synthetic tuple-like ABI struct types used for multi-register aggregates.
-    pub abi_tuple_structs: RefCell<FxHashMap<Vec<CTy<'mx>>, CTy<'mx>>>,
+    pub abi_tuple_structs: RefCell<FxHashMap<Vec<AbiTupleFieldKey<'mx>>, CTy<'mx>>>,
     /// Field names for each synthetic ABI tuple-like struct type.
     pub abi_tuple_fields: RefCell<FxHashMap<CTy<'mx>, Vec<&'mx str>>>,
     /// Field types for each synthetic ABI tuple-like struct type.
     pub abi_tuple_field_tys: RefCell<FxHashMap<CTy<'mx>, Vec<CTy<'mx>>>>,
+    /// Monotonic counter for synthetic C struct/type names.
+    pub synthetic_type_ids: Cell<usize>,
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
@@ -148,9 +162,16 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             abi_tuple_structs: RefCell::new(FxHashMap::default()),
             abi_tuple_fields: RefCell::new(FxHashMap::default()),
             abi_tuple_field_tys: RefCell::new(FxHashMap::default()),
+            synthetic_type_ids: Cell::new(0),
         };
         cx.predeclare_repr_c_structs();
         cx
+    }
+
+    pub(crate) fn next_synthetic_type_id(&self) -> usize {
+        let id = self.synthetic_type_ids.get();
+        self.synthetic_type_ids.set(id + 1);
+        id
     }
 
     pub(crate) fn register_static_symbol(&self, def_id: DefId, symbol_name: &str) -> &'mx str {
@@ -261,7 +282,12 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     }
 
     pub(crate) fn abi_tuple_ty(&self, fields: &[CTy<'mx>]) -> CTy<'mx> {
-        if let Some(ty) = self.abi_tuple_structs.borrow().get(fields).copied() {
+        let key = fields
+            .iter()
+            .copied()
+            .map(|field_ty| self.abi_tuple_field_key(field_ty))
+            .collect::<Vec<_>>();
+        if let Some(ty) = self.abi_tuple_structs.borrow().get(&key).copied() {
             return ty;
         }
 
@@ -314,10 +340,29 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 fields: layout_fields,
             },
         );
-        self.abi_tuple_structs.borrow_mut().insert(fields.to_vec(), ty);
+        self.abi_tuple_structs.borrow_mut().insert(key, ty);
         self.abi_tuple_fields.borrow_mut().insert(ty, field_names);
         self.abi_tuple_field_tys.borrow_mut().insert(ty, fields.to_vec());
         ty
+    }
+
+    fn abi_tuple_field_key(&self, ty: CTy<'mx>) -> AbiTupleFieldKey<'mx> {
+        match ty {
+            CTy::Void => AbiTupleFieldKey::Void,
+            CTy::Bool => AbiTupleFieldKey::Bool,
+            CTy::Char => AbiTupleFieldKey::Char,
+            CTy::Int(int) => AbiTupleFieldKey::Int(int),
+            CTy::UInt(int) => AbiTupleFieldKey::UInt(int),
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Pointer(elem) => {
+                    AbiTupleFieldKey::Pointer(Box::new(self.abi_tuple_field_key(*elem)))
+                }
+                CTyKind::Array(elem, len) => {
+                    AbiTupleFieldKey::Array(Box::new(self.abi_tuple_field_key(*elem)), *len)
+                }
+                CTyKind::Struct(name) => AbiTupleFieldKey::Struct(name),
+            },
+        }
     }
 
     fn c_ty_size_align(&self, ty: CTy<'mx>) -> Option<(usize, usize)> {
