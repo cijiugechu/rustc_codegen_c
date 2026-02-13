@@ -136,7 +136,8 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 rustc_middle::ty::List::empty(),
                 DUMMY_SP,
             );
-            if let Some(func) = self.function_instances.borrow().get(&instance).copied() {
+            let existing = { self.function_instances.borrow().get(&instance).copied() };
+            if let Some(func) = existing {
                 func
             } else {
                 let symbol_name = sanitize_symbol_name(self.tcx.symbol_name(instance).name);

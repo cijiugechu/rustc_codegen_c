@@ -214,6 +214,49 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
         cty
     }
+
+    pub(crate) fn define_closure_layout(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
+        if let Some(ty) = self.adt_types.borrow().get(&layout.ty).copied() {
+            return ty;
+        }
+
+        let name = self.mcx.alloc_str(&format!("__rcgenc_closure_{}", self.next_synthetic_type_id()));
+        let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+
+        let field_count = layout.fields.count();
+        let mut fields = Vec::with_capacity(field_count);
+        let mut struct_fields = Vec::with_capacity(field_count);
+        for i in 0..field_count {
+            let field_name = self.mcx.alloc_str(&format!("f{i}"));
+            let field_layout = layout.field(&*self, i);
+            let field_cty = if field_layout.size.bytes() == 0 {
+                CTy::UInt(CUintTy::U8)
+            } else {
+                self.backend_type(field_layout)
+            };
+            fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: field_cty,
+                offset: layout.fields.offset(i).bytes_usize(),
+                size: field_layout.size.bytes_usize(),
+            });
+            struct_fields.push(CStructField { name: field_name, ty: field_cty });
+        }
+
+        let layout_info = AdtLayoutInfo {
+            size: layout.size.bytes_usize(),
+            align: layout.align.abi.bytes() as usize,
+            repr_c: false,
+            fields: fields.clone(),
+        };
+
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
+        self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
+        self.struct_layouts.borrow_mut().insert(cty, layout_info);
+        self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
+        cty
+    }
 }
 
 impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
@@ -237,6 +280,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 }
             }
             TyKind::Tuple(..) => self.define_tuple_layout(layout),
+            TyKind::Closure(..) => self.define_closure_layout(layout),
             TyKind::Ref(..) | TyKind::RawPtr(..) => self.immediate_backend_type(layout),
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
