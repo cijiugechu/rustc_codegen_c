@@ -19,6 +19,8 @@ pub type CFunc<'mx> = Interned<'mx, CFuncKind<'mx>>;
 pub struct CFuncKind<'mx> {
     /// Function name.
     pub name: &'mx str,
+    /// Optional link symbol name emitted on declarations.
+    pub link_name: Option<&'mx str>,
     /// Return type.
     pub ty: CTy<'mx>,
     /// Function parameters.
@@ -47,6 +49,7 @@ impl<'mx> CFuncKind<'mx> {
 
         Self {
             name,
+            link_name: None,
             ty,
             params,
             body: RefCell::new(Vec::new()),
@@ -54,6 +57,12 @@ impl<'mx> CFuncKind<'mx> {
             block_counter,
             emitted_labels,
         }
+    }
+
+    /// Set the link symbol name used for declarations.
+    pub fn with_link_name(mut self, link_name: Option<&'mx str>) -> Self {
+        self.link_name = link_name;
+        self
     }
 
     /// Push a statement to the end of the function body.
@@ -93,7 +102,7 @@ impl<'mx> ModuleCtx<'mx> {
 impl Print for CFunc<'_> {
     fn print_to(&self, ctx: &mut PrinterCtx) {
         ctx.ibox(0, |ctx| {
-            print_signature(*self, ctx);
+            print_signature(*self, ctx, false);
             ctx.softbreak(); // I don't know how to avoid a newline here
             print_compound(&self.0.body.borrow(), ctx);
         })
@@ -101,11 +110,30 @@ impl Print for CFunc<'_> {
 }
 
 pub(crate) fn print_func_decl(func: CFunc, ctx: &mut PrinterCtx) {
-    print_signature(func, ctx);
+    print_signature(func, ctx, true);
     ctx.word(";");
 }
 
-fn print_signature(func: CFunc, ctx: &mut PrinterCtx) {
+fn c_string_literal(raw: &str) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(raw.len() + 2);
+    out.push('"');
+    for byte in raw.bytes() {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(byte as char),
+            _ => {
+                let _ = write!(&mut out, "\\{:03o}", byte);
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn print_signature(func: CFunc, ctx: &mut PrinterCtx, with_link_name: bool) {
     ctx.ibox(0, |ctx| {
         print_declarator(func.0.ty, Some(CValue::Func(func.0.name)), ctx);
 
@@ -116,5 +144,13 @@ fn print_signature(func: CFunc, ctx: &mut PrinterCtx) {
                 })
             })
         });
+
+        if with_link_name {
+            if let Some(link_name) = func.0.link_name {
+                ctx.word(" __asm__(");
+                ctx.word(c_string_literal(link_name));
+                ctx.word(")");
+            }
+        }
     });
 }

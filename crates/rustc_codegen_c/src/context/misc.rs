@@ -42,6 +42,12 @@ fn sanitize_symbol_name(symbol_name: &str) -> String {
     out
 }
 
+fn declaration_symbol_names<'a>(symbol_name: &'a str) -> (String, Option<&'a str>) {
+    let sanitized = sanitize_symbol_name(symbol_name);
+    let link_name = if sanitized == symbol_name { None } else { Some(symbol_name) };
+    (sanitized, link_name)
+}
+
 fn function_signature_from_type<'mx>(fn_type: CTy<'mx>) -> (CTy<'mx>, Vec<CTy<'mx>>) {
     match fn_type {
         CTy::Ref(kind) => match kind.0 {
@@ -74,7 +80,7 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         let fn_abi = self.fn_abi_of_instance(instance, rustc_middle::ty::List::empty());
         let (mut ret, mut args) = self.fn_abi_to_c_signature(fn_abi);
 
-        let symbol_name = sanitize_symbol_name(self.tcx.symbol_name(instance).name);
+        let symbol_name = self.tcx.symbol_name(instance).name;
         let is_printf = symbol_name == "printf";
         if symbol_name == "malloc" {
             ret =
@@ -106,11 +112,14 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             args = vec![];
         }
 
-        let func: CFunc<'mx> = Interned::new_unchecked(self.mcx.func(CFuncKind::new(
-            self.mcx.alloc_str(&symbol_name),
-            ret,
-            args,
-        )));
+        let (symbol_name, link_name) = declaration_symbol_names(symbol_name);
+
+        let func: CFunc<'mx> = Interned::new_unchecked(
+            self.mcx.func(
+                CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
+                    .with_link_name(link_name.map(|name| self.mcx.alloc_str(name))),
+            ),
+        );
         if !is_printf {
             self.mcx.module().push_func(func);
         }
@@ -140,9 +149,11 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             if let Some(func) = existing {
                 func
             } else {
-                let symbol_name = sanitize_symbol_name(self.tcx.symbol_name(instance).name);
+                let symbol_name = self.tcx.symbol_name(instance).name;
+                let (symbol_name, link_name) = declaration_symbol_names(symbol_name);
                 let func =
-                    CFuncKind::new(self.mcx.alloc_str(&symbol_name), CTy::Int(CIntTy::I32), []);
+                    CFuncKind::new(self.mcx.alloc_str(&symbol_name), CTy::Int(CIntTy::I32), [])
+                        .with_link_name(link_name.map(|name| self.mcx.alloc_str(name)));
                 let func = Interned::new_unchecked(self.mcx.func(func));
                 self.mcx.module().push_func(func);
                 self.function_instances.borrow_mut().insert(instance, func);
@@ -194,9 +205,11 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             ));
             params[1] = argv_ty;
         }
-        let func = Interned::new_unchecked(
-            self.mcx.func(CFuncKind::new(self.mcx.alloc_str(entry_name), ret, params)),
-        );
+        let func = Interned::new_unchecked(self.mcx.func(CFuncKind::new(
+            self.mcx.alloc_str(entry_name),
+            ret,
+            params,
+        )));
         self.mcx.module().push_func(func);
         Some(func)
     }

@@ -6,7 +6,8 @@ use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{
-    BackendTypes, BuilderMethods, ConstCodegenMethods, LayoutTypeCodegenMethods,
+    BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
+    LayoutTypeCodegenMethods,
 };
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
@@ -122,6 +123,10 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             .get(&value)
             .copied()
             .or_else(|| self.cx.value_tys.borrow().get(&(self.fkey(), value)).copied())
+            .or_else(|| match value {
+                CValue::Func(_) => Some(self.cx.val_ty(value)),
+                _ => None,
+            })
     }
 
     fn packed_pair_values(&self, value: CValue<'mx>) -> Option<(CValue<'mx>, CValue<'mx>)> {
@@ -1747,7 +1752,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     self.ensure_alloca_decl(ret_ptr, Some(self.cx.backend_type(fn_abi.ret.layout)));
                 }
             }
-            let arg_start = if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
+            let arg_start =
+                if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) { 1 } else { 0 };
             for (abi_arg, value) in fn_abi.args.iter().zip(args.iter().skip(arg_start)) {
                 if matches!(abi_arg.mode, PassMode::Indirect { meta_attrs: None, .. }) {
                     self.ensure_alloca_decl(*value, Some(self.cx.backend_type(abi_arg.layout)));

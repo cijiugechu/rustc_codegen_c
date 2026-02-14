@@ -39,6 +39,12 @@ fn sanitize_symbol_name(symbol_name: &str) -> String {
     out
 }
 
+fn declaration_symbol_names<'a>(symbol_name: &'a str) -> (String, Option<&'a str>) {
+    let sanitized = sanitize_symbol_name(symbol_name);
+    let link_name = if sanitized == symbol_name { None } else { Some(symbol_name) };
+    (sanitized, link_name)
+}
+
 impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn predefine_static(
         &mut self,
@@ -92,8 +98,9 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         }
 
         let is_printf = symbol_name == "printf";
-        let symbol_name = sanitize_symbol_name(symbol_name);
-        let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args);
+        let (symbol_name, link_name) = declaration_symbol_names(symbol_name);
+        let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
+            .with_link_name(link_name.map(|name| self.mcx.alloc_str(name)));
         let func = Interned::new_unchecked(self.mcx.func(func));
         if !is_printf {
             self.mcx.module().push_func(func);
