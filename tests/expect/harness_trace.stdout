@@ -2,8 +2,8 @@ HARNESS|BEGIN|harness_trace
 HARNESS|STATE|a|5
 HARNESS|STATE|b|10
 HARNESS|STATE|a less than b|true
-HARNESS|STATE|marker|U+005A
-HARNESS|STATE|series|[1, 2, 3]
+HARNESS|STATE|marker|'Z'
+HARNESS|STATE|pair|Pair { lhs: 5, rhs: 10 }
 HARNESS|PASS|a should be 5
 HARNESS|PASS|b should be 10
 HARNESS|PASS|a less than b

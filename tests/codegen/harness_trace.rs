@@ -12,6 +12,12 @@ extern crate test_harness;
 
 use core::panic::PanicInfo;
 
+#[derive(Debug)]
+struct Pair {
+    lhs: i32,
+    rhs: i32,
+}
+
 #[panic_handler]
 fn panic(_: &PanicInfo<'_>) -> ! {
     loop {}
@@ -24,13 +30,14 @@ pub extern "C" fn main() -> i32 {
     let b = a * 2;
     let marker = 'Z';
     let series = [1i32, 2, 3];
+    let pair = Pair { lhs: a, rhs: b };
 
     test_harness::begin("harness_trace");
     test_harness::trace!("a", a);
     test_harness::trace!("b", b);
     test_harness::trace!("a less than b", a < b);
     test_harness::trace!("marker", marker);
-    test_harness::trace!("series", series);
+    test_harness::trace!("pair", pair);
     test_harness::assert_eq!("a should be 5", 5, a);
     test_harness::assert_eq!("b should be 10", 10, b);
     test_harness::assert_eq!("a less than b", true, a < b);

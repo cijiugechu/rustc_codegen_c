@@ -3,6 +3,8 @@
 
 extern crate libc;
 
+use core::fmt::{self, Write};
+
 static mut PASS_COUNT: i32 = 0;
 static mut FAIL_COUNT: i32 = 0;
 
@@ -11,12 +13,16 @@ pub trait HarnessNum: Copy {
     fn assert_eq_value(desc: &str, expected: Self, actual: Self);
 }
 
-pub trait HarnessTrace: Copy {
-    fn trace_value(key: &str, value: Self);
-}
+struct TraceDebugWriter;
 
-pub trait HarnessArrayElem: Copy {
-    fn trace_array_elem(value: Self);
+impl Write for TraceDebugWriter {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let (s_ptr, s_len) = str_parts(s);
+        unsafe {
+            libc::printf(b"%.*s\0".as_ptr().cast(), s_len, s_ptr);
+        }
+        Ok(())
+    }
 }
 
 fn record_pass(desc: &str) {
@@ -120,28 +126,6 @@ pub fn trace_mut_ptr<T>(key: &str, value: *mut T) {
     trace_ptr(key, value as *const T);
 }
 
-pub fn trace_array<T: HarnessArrayElem, const N: usize>(key: &str, value: [T; N]) {
-    let (key_ptr, key_len) = str_parts(key);
-    unsafe {
-        libc::printf(b"HARNESS|STATE|%.*s|[\0".as_ptr().cast(), key_len, key_ptr);
-    }
-
-    let mut i = 0;
-    while i < N {
-        if i > 0 {
-            unsafe {
-                libc::printf(b", \0".as_ptr().cast());
-            }
-        }
-        T::trace_array_elem(value[i]);
-        i += 1;
-    }
-
-    unsafe {
-        libc::printf(b"]\n\0".as_ptr().cast());
-    }
-}
-
 pub fn assert_eq_i64(desc: &str, expected: i64, actual: i64) {
     let (desc_ptr, desc_len) = str_parts(desc);
     unsafe {
@@ -196,8 +180,18 @@ pub fn assert_eq_num<T: HarnessNum>(desc: &str, expected: T, actual: T) {
     T::assert_eq_value(desc, expected, actual);
 }
 
-pub fn trace_value<T: HarnessTrace>(key: &str, value: T) {
-    T::trace_value(key, value);
+pub fn trace_value<T: core::fmt::Debug + ?Sized>(key: &str, value: &T) {
+    let (key_ptr, key_len) = str_parts(key);
+    unsafe {
+        libc::printf(b"HARNESS|STATE|%.*s|\0".as_ptr().cast(), key_len, key_ptr);
+    }
+
+    let mut writer = TraceDebugWriter;
+    let _ = write!(&mut writer, "{:?}", value);
+
+    unsafe {
+        libc::printf(b"\n\0".as_ptr().cast());
+    }
 }
 
 macro_rules! impl_harness_num_signed {
@@ -235,113 +229,6 @@ macro_rules! impl_harness_num_unsigned {
 impl_harness_num_signed!(i8, i16, i32, i64, isize);
 impl_harness_num_unsigned!(u8, u16, u32, u64, usize);
 
-macro_rules! impl_harness_array_signed {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl HarnessArrayElem for $ty {
-                fn trace_array_elem(value: Self) {
-                    unsafe {
-                        libc::printf(b"%lld\0".as_ptr().cast(), value as i64);
-                    }
-                }
-            }
-        )*
-    };
-}
-
-macro_rules! impl_harness_array_unsigned {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl HarnessArrayElem for $ty {
-                fn trace_array_elem(value: Self) {
-                    unsafe {
-                        libc::printf(b"%llu\0".as_ptr().cast(), value as u64);
-                    }
-                }
-            }
-        )*
-    };
-}
-
-impl_harness_array_signed!(i8, i16, i32, i64, isize);
-impl_harness_array_unsigned!(u8, u16, u32, u64, usize);
-
-impl HarnessArrayElem for bool {
-    fn trace_array_elem(value: Self) {
-        let text = if value { "true" } else { "false" };
-        let (text_ptr, text_len) = str_parts(text);
-        unsafe {
-            libc::printf(b"%.*s\0".as_ptr().cast(), text_len, text_ptr);
-        }
-    }
-}
-
-impl HarnessArrayElem for char {
-    fn trace_array_elem(value: Self) {
-        unsafe {
-            libc::printf(b"U+%04X\0".as_ptr().cast(), value as u32);
-        }
-    }
-}
-
-impl<T> HarnessArrayElem for *const T {
-    fn trace_array_elem(value: Self) {
-        unsafe {
-            libc::printf(b"%p\0".as_ptr().cast(), value as *const libc::c_void);
-        }
-    }
-}
-
-impl<T> HarnessArrayElem for *mut T {
-    fn trace_array_elem(value: Self) {
-        unsafe {
-            libc::printf(b"%p\0".as_ptr().cast(), value as *const libc::c_void);
-        }
-    }
-}
-
-impl<T: HarnessNum> HarnessTrace for T {
-    fn trace_value(key: &str, value: Self) {
-        trace_num(key, value);
-    }
-}
-
-impl HarnessTrace for bool {
-    fn trace_value(key: &str, value: Self) {
-        trace_bool(key, value);
-    }
-}
-
-impl HarnessTrace for char {
-    fn trace_value(key: &str, value: Self) {
-        trace_char(key, value);
-    }
-}
-
-impl<'a> HarnessTrace for &'a str {
-    fn trace_value(key: &str, value: Self) {
-        trace_str(key, value);
-    }
-}
-
-impl<T> HarnessTrace for *const T {
-    fn trace_value(key: &str, value: Self) {
-        trace_ptr(key, value);
-    }
-}
-
-impl<T> HarnessTrace for *mut T {
-    fn trace_value(key: &str, value: Self) {
-        trace_mut_ptr(key, value);
-    }
-}
-
-impl<T: HarnessArrayElem, const N: usize> HarnessTrace for [T; N] {
-    fn trace_value(key: &str, value: Self) {
-        trace_array(key, value);
-    }
-}
-
 #[macro_export]
 macro_rules! trace_num {
     ($key:expr, $value:expr $(,)?) => {{
@@ -352,7 +239,7 @@ macro_rules! trace_num {
 #[macro_export]
 macro_rules! trace {
     ($key:expr, $value:expr $(,)?) => {{
-        $crate::trace_value($key, $value)
+        $crate::trace_value($key, &$value)
     }};
 }
 
