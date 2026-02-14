@@ -2,7 +2,7 @@ use rustc_codegen_ssa::traits::BaseTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_type_ir::{IntTy, UintTy};
 
-use rustc_codegen_c_ast::ty::{CTy, CTyKind};
+use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind};
 
 use crate::context::CodegenCx;
 
@@ -36,11 +36,11 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_f32(&self) -> Self::Type {
-        todo!()
+        CTy::Float(CFloatTy::F32)
     }
 
     fn type_f64(&self) -> Self::Type {
-        todo!()
+        CTy::Float(CFloatTy::F64)
     }
 
     fn type_f128(&self) -> Self::Type {
@@ -63,6 +63,8 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             CTy::Bool | CTy::Char | CTy::Int(_) | CTy::UInt(_) => {
                 rustc_codegen_ssa::common::TypeKind::Integer
             }
+            CTy::Float(CFloatTy::F32) => rustc_codegen_ssa::common::TypeKind::Float,
+            CTy::Float(CFloatTy::F64) => rustc_codegen_ssa::common::TypeKind::Double,
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => rustc_codegen_ssa::common::TypeKind::Pointer,
                 CTyKind::Array(_, _) => rustc_codegen_ssa::common::TypeKind::Array,
@@ -98,7 +100,11 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn float_width(&self, ty: Self::Type) -> usize {
-        todo!()
+        match ty {
+            CTy::Float(CFloatTy::F32) => 32,
+            CTy::Float(CFloatTy::F64) => 64,
+            _ => panic!("not a floating point type: {ty:?}"),
+        }
     }
 
     fn int_width(&self, ty: Self::Type) -> u64 {

@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
     LayoutTypeCodegenMethods,
@@ -280,6 +280,54 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             Some(ty) if ty != target_ty => self.mcx.cast(target_ty, self.mcx.value(value)),
             _ => self.mcx.value(value),
         }
+    }
+
+    fn infer_float_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
+        let ty = match (self.value_ty(lhs), self.value_ty(rhs)) {
+            (Some(lhs), Some(rhs)) if lhs == rhs => lhs,
+            (Some(lhs), Some(rhs)) => {
+                panic!("type mismatch for {op}: {lhs:?} vs {rhs:?}")
+            }
+            (Some(lhs), None) => lhs,
+            (None, Some(rhs)) => rhs,
+            (None, None) => panic!("cannot infer operand type for {op}"),
+        };
+
+        match ty {
+            CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64) => ty,
+            _ => panic!("unsupported type for {op}: {ty:?}"),
+        }
+    }
+
+    fn coerce_float_operand_expr(
+        &self,
+        value: CValue<'mx>,
+        target_ty: CTy<'mx>,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        match self.value_ty(value) {
+            Some(ty) if ty != target_ty => self.mcx.cast(target_ty, self.mcx.value(value)),
+            None if matches!(value, CValue::Scalar(_) | CValue::ScalarTyped(_, _)) => {
+                self.mcx.cast(target_ty, self.mcx.value(value))
+            }
+            _ => self.mcx.value(value),
+        }
+    }
+
+    fn codegen_float_binop(
+        &mut self,
+        lhs: CValue<'mx>,
+        rhs: CValue<'mx>,
+        op_name: &str,
+        c_op: &'static str,
+    ) -> CValue<'mx> {
+        let ty = self.infer_float_binop_ty(lhs, rhs, op_name);
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_float_operand_expr(lhs, ty);
+        let rhs = self.coerce_float_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, c_op);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn infer_bitwise_binop_ty(&self, lhs: CValue<'mx>, rhs: CValue<'mx>, op: &str) -> CTy<'mx> {
@@ -668,15 +716,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_float_binop(lhs, rhs, "fadd", "+")
     }
 
     fn fadd_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fadd(lhs, rhs)
     }
 
     fn fadd_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fadd(lhs, rhs)
     }
 
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -691,15 +739,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fsub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_float_binop(lhs, rhs, "fsub", "-")
     }
 
     fn fsub_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fsub(lhs, rhs)
     }
 
     fn fsub_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fsub(lhs, rhs)
     }
 
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -714,15 +762,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fmul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_float_binop(lhs, rhs, "fmul", "*")
     }
 
     fn fmul_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fmul(lhs, rhs)
     }
 
     fn fmul_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fmul(lhs, rhs)
     }
 
     fn udiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -762,15 +810,15 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.codegen_float_binop(lhs, rhs, "fdiv", "/")
     }
 
     fn fdiv_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fdiv(lhs, rhs)
     }
 
     fn fdiv_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.fdiv(lhs, rhs)
     }
 
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -782,15 +830,27 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_float_binop_ty(lhs, rhs, "frem");
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_float_operand_expr(lhs, ty);
+        let rhs = self.coerce_float_operand_expr(rhs, ty);
+        let builtin = match ty {
+            CTy::Float(CFloatTy::F32) => "__builtin_fmodf",
+            CTy::Float(CFloatTy::F64) => "__builtin_fmod",
+            _ => unreachable!(),
+        };
+        let expr = self.mcx.call(self.mcx.raw(builtin), vec![lhs, rhs]);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn frem_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.frem(lhs, rhs)
     }
 
     fn frem_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        self.frem(lhs, rhs)
     }
 
     fn shl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
@@ -930,7 +990,17 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fneg(&mut self, v: Self::Value) -> Self::Value {
-        todo!()
+        let ty = match self.value_ty(v) {
+            Some(ty @ (CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64))) => ty,
+            Some(other) => panic!("unsupported type for fneg: {other:?}"),
+            None => panic!("cannot infer operand type for fneg"),
+        };
+        let ret = self.bb.func.0.next_local_var();
+        let operand = self.coerce_float_operand_expr(v, ty);
+        let expr = self.mcx.unary("-", operand);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn not(&mut self, v: Self::Value) -> Self::Value {
@@ -1353,35 +1423,73 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn fptoui_sat(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        panic!("float->int cast is not supported yet in rustc_codegen_c")
     }
 
     fn fptosi_sat(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        panic!("float->int cast is not supported yet in rustc_codegen_c")
     }
 
     fn fptoui(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        panic!("float->int cast is not supported yet in rustc_codegen_c")
     }
 
     fn fptosi(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        panic!("float->int cast is not supported yet in rustc_codegen_c")
     }
 
     fn uitofp(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        if !matches!(dest_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64)) {
+            panic!("uitofp destination must be float, got {dest_ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn sitofp(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        if !matches!(dest_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64)) {
+            panic!("sitofp destination must be float, got {dest_ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn fptrunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let src_ty = self
+            .value_ty(val)
+            .unwrap_or_else(|| panic!("cannot infer source type for fptrunc: {val:?}"));
+        if !matches!(src_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64))
+            || !matches!(dest_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64))
+        {
+            panic!("fptrunc expects float->float cast, got {src_ty:?} -> {dest_ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn fpext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
-        todo!()
+        let src_ty = self
+            .value_ty(val)
+            .unwrap_or_else(|| panic!("cannot infer source type for fpext: {val:?}"));
+        if !matches!(src_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64))
+            || !matches!(dest_ty, CTy::Float(CFloatTy::F32) | CTy::Float(CFloatTy::F64))
+        {
+            panic!("fpext expects float->float cast, got {src_ty:?} -> {dest_ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
+        self.record_value_ty(ret, dest_ty);
+        ret
     }
 
     fn ptrtoint(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
@@ -1515,7 +1623,41 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         lhs: Self::Value,
         rhs: Self::Value,
     ) -> Self::Value {
-        todo!()
+        use rustc_codegen_ssa::common::RealPredicate;
+
+        let ty = self.infer_float_binop_ty(lhs, rhs, "fcmp");
+        let lhs_expr = self.coerce_float_operand_expr(lhs, ty);
+        let rhs_expr = self.coerce_float_operand_expr(rhs, ty);
+
+        let lhs_is_nan = self.mcx.call(self.mcx.raw("__builtin_isnan"), vec![lhs_expr]);
+        let rhs_is_nan = self.mcx.call(self.mcx.raw("__builtin_isnan"), vec![rhs_expr]);
+        let unordered = self.mcx.binary(lhs_is_nan, rhs_is_nan, "||");
+        let ordered = self.mcx.unary("!", unordered);
+        let cmp = |op| self.mcx.binary(lhs_expr, rhs_expr, op);
+
+        let expr = match op {
+            RealPredicate::RealOEQ => self.mcx.binary(ordered, cmp("=="), "&&"),
+            RealPredicate::RealOGT => self.mcx.binary(ordered, cmp(">"), "&&"),
+            RealPredicate::RealOGE => self.mcx.binary(ordered, cmp(">="), "&&"),
+            RealPredicate::RealOLT => self.mcx.binary(ordered, cmp("<"), "&&"),
+            RealPredicate::RealOLE => self.mcx.binary(ordered, cmp("<="), "&&"),
+            RealPredicate::RealONE => self.mcx.binary(ordered, cmp("!="), "&&"),
+            RealPredicate::RealORD => ordered,
+            RealPredicate::RealUNO => unordered,
+            RealPredicate::RealUEQ => self.mcx.binary(unordered, cmp("=="), "||"),
+            RealPredicate::RealUGT => self.mcx.binary(unordered, cmp(">"), "||"),
+            RealPredicate::RealUGE => self.mcx.binary(unordered, cmp(">="), "||"),
+            RealPredicate::RealULT => self.mcx.binary(unordered, cmp("<"), "||"),
+            RealPredicate::RealULE => self.mcx.binary(unordered, cmp("<="), "||"),
+            RealPredicate::RealUNE => self.mcx.binary(unordered, cmp("!="), "||"),
+            RealPredicate::RealPredicateTrue => self.mcx.value(self.const_bool(true)),
+            RealPredicate::RealPredicateFalse => self.mcx.value(self.const_bool(false)),
+        };
+
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, CTy::Bool, Some(expr))));
+        self.record_value_ty(ret, CTy::Bool);
+        ret
     }
 
     fn memcpy(

@@ -9,7 +9,7 @@ use rustc_abi::{HasDataLayout, Reg, RegKind, Size, TargetDataLayout};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::func::CFunc;
-use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::{BackendTypes, LayoutTypeCodegenMethods};
 use rustc_hash::FxHashMap;
@@ -70,6 +70,7 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     Char,
     Int(CIntTy),
     UInt(CUintTy),
+    Float(CFloatTy),
     Pointer(Box<AbiTupleFieldKey<'mx>>),
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
     Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
@@ -335,6 +336,8 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
             (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
             (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            (RegKind::Float, 4) => CTy::Float(CFloatTy::F32),
+            (RegKind::Float, 8) => CTy::Float(CFloatTy::F64),
             _ => panic!("unsupported ABI register for C backend: {reg:?}"),
         }
     }
@@ -568,6 +571,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             CTy::Char => AbiTupleFieldKey::Char,
             CTy::Int(int) => AbiTupleFieldKey::Int(int),
             CTy::UInt(int) => AbiTupleFieldKey::UInt(int),
+            CTy::Float(float) => AbiTupleFieldKey::Float(float),
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(elem) => {
                     AbiTupleFieldKey::Pointer(Box::new(self.abi_tuple_field_key(*elem)))
@@ -612,6 +616,13 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     CUintTy::U32 => 4,
                     CUintTy::U64 => 8,
                     CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
+                };
+                Some((bytes, bytes))
+            }
+            CTy::Float(float) => {
+                let bytes = match float {
+                    CFloatTy::F32 => 4,
+                    CFloatTy::F64 => 8,
                 };
                 Some((bytes, bytes))
             }

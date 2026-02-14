@@ -15,6 +15,7 @@ use crate::context::CodegenCx;
 fn value_expr_text(value: CValue<'_>) -> String {
     match value {
         CValue::Scalar(v) | CValue::ScalarTyped(v, _) => v.to_string(),
+        CValue::RealLiteral(v) => v.to_string(),
         CValue::Local(i) => format!("_{i}"),
         CValue::Func(name) => name.to_string(),
     }

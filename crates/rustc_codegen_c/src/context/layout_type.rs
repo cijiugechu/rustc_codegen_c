@@ -1,6 +1,6 @@
-use rustc_abi::{BackendRepr, Integer, Primitive, RegKind};
+use rustc_abi::{BackendRepr, Float as AbiFloat, Integer, Primitive, RegKind};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
-use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_middle::ty::layout::{FnAbiOf, LayoutOf, TyAndLayout};
@@ -44,7 +44,11 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
                 self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
             )),
-            Primitive::Float(_) => todo!("float scalar backend type is not supported yet"),
+            Primitive::Float(AbiFloat::F32) => CTy::Float(CFloatTy::F32),
+            Primitive::Float(AbiFloat::F64) => CTy::Float(CFloatTy::F64),
+            Primitive::Float(other) => {
+                panic!("unsupported float scalar backend type for C backend: {other:?}")
+            }
         }
     }
 
@@ -316,6 +320,8 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
             (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
             (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            (RegKind::Float, 4) => CTy::Float(CFloatTy::F32),
+            (RegKind::Float, 8) => CTy::Float(CFloatTy::F64),
             _ => panic!("unsupported ABI register for C backend: {ty:?}"),
         }
     }
@@ -402,7 +408,11 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
                 self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
             )),
-            Primitive::Float(_) => todo!(),
+            Primitive::Float(AbiFloat::F32) => CTy::Float(CFloatTy::F32),
+            Primitive::Float(AbiFloat::F64) => CTy::Float(CFloatTy::F64),
+            Primitive::Float(other) => {
+                panic!("unsupported float scalar pair element type for C backend: {other:?}")
+            }
         }
     }
 }

@@ -27,6 +27,8 @@ pub enum CTy<'mx> {
     Int(CIntTy),
     /// An unsigned integer type.
     UInt(CUintTy),
+    /// A floating point type.
+    Float(CFloatTy),
     /// A non-primitive C type, e.g. a pointer type.
     ///
     /// This is an interned reference to a complex type.
@@ -65,6 +67,7 @@ impl<'mx> CTy<'mx> {
             CTy::Char => "char",
             CTy::Int(ty) => ty.to_str(),
             CTy::UInt(ty) => ty.to_str(),
+            CTy::Float(ty) => ty.to_str(),
             CTy::Ref(_) => unreachable!(),
         }
     }
@@ -85,7 +88,10 @@ impl<'mx> CTy<'mx> {
     }
 
     pub fn is_primitive(&self) -> bool {
-        matches!(self, CTy::Void | CTy::Bool | CTy::Char | CTy::Int(_) | CTy::UInt(_))
+        matches!(
+            self,
+            CTy::Void | CTy::Bool | CTy::Char | CTy::Int(_) | CTy::UInt(_) | CTy::Float(_)
+        )
     }
     pub fn is_array(&self) -> bool {
         matches!(self, CTy::Ref(Interned(CTyKind::Array(_, _), _)))
@@ -149,6 +155,23 @@ pub enum CUintTy {
     U16,
     U32,
     U64,
+}
+
+/// C floating point types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CFloatTy {
+    F32,
+    F64,
+}
+
+impl CFloatTy {
+    /// Get the corresponding C type name.
+    pub fn to_str(self) -> &'static str {
+        match self {
+            CFloatTy::F32 => "float",
+            CFloatTy::F64 => "double",
+        }
+    }
 }
 
 impl CUintTy {

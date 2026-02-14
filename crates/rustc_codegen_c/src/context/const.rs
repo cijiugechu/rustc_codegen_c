@@ -1,5 +1,6 @@
+use rustc_abi::{Float as AbiFloat, Primitive};
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods};
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 use rustc_data_structures::intern::Interned;
@@ -33,6 +34,7 @@ fn c_string_literal_from_bytes(bytes: &[u8]) -> String {
 fn value_expr_text(value: CValue<'_>) -> String {
     match value {
         CValue::Scalar(v) | CValue::ScalarTyped(v, _) => v.to_string(),
+        CValue::RealLiteral(v) => v.to_string(),
         CValue::Local(i) => format!("_{i}"),
         CValue::Func(name) => name.to_string(),
     }
@@ -176,7 +178,43 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn const_real(&self, t: Self::Type, val: f64) -> Self::Value {
-        todo!()
+        let literal = match t {
+            CTy::Float(CFloatTy::F32) => {
+                if val.is_nan() {
+                    "__builtin_nanf(\"\")".to_string()
+                } else if val.is_infinite() {
+                    if val.is_sign_negative() {
+                        "-__builtin_inff()".to_string()
+                    } else {
+                        "__builtin_inff()".to_string()
+                    }
+                } else {
+                    let v = val as f32;
+                    format!("{:.9e}f", v)
+                }
+            }
+            CTy::Float(CFloatTy::F64) => {
+                if val.is_nan() {
+                    "__builtin_nan(\"\")".to_string()
+                } else if val.is_infinite() {
+                    if val.is_sign_negative() {
+                        "-__builtin_inf()".to_string()
+                    } else {
+                        "__builtin_inf()".to_string()
+                    }
+                } else {
+                    format!("{:.17e}", val)
+                }
+            }
+            _ => panic!("const_real expects f32/f64 destination type, got {t:?}"),
+        };
+
+        let literal = self.mcx.alloc_str(&literal);
+        let value = CValue::RealLiteral(literal);
+        if let Some(fkey) = self.current_fkey.get() {
+            self.value_tys.borrow_mut().insert((fkey, value), t);
+        }
+        value
     }
 
     fn const_str(&self, s: &str) -> (Self::Value, Self::Value) {
@@ -277,7 +315,18 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
         llty: Self::Type,
     ) -> Self::Value {
         match cv {
-            Scalar::Int(scalar) => self.typed_scalar(scalar.to_int(scalar.size()), llty),
+            Scalar::Int(scalar) => match layout.primitive() {
+                Primitive::Float(AbiFloat::F32) => {
+                    self.const_real(llty, f32::from_bits(scalar.to_u32()) as f64)
+                }
+                Primitive::Float(AbiFloat::F64) => {
+                    self.const_real(llty, f64::from_bits(scalar.to_u64()))
+                }
+                Primitive::Float(float) => {
+                    panic!("unsupported float scalar constant in scalar_to_backend: {float:?}")
+                }
+                _ => self.typed_scalar(scalar.to_int(scalar.size()), llty),
+            },
             Scalar::Ptr(ptr, _) => {
                 let (prov, offset) = ptr.prov_and_relative_offset();
                 let base = self.global_alloc_base_value(self.tcx.global_alloc(prov.alloc_id()));
