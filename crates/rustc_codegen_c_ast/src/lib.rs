@@ -25,6 +25,7 @@ pub mod func;
 pub mod module;
 pub mod pretty;
 pub mod stmt;
+pub mod symbol;
 pub mod ty;
 
 /// A context containing a C file's AST nodes which are under construction.

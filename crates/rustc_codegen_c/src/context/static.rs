@@ -48,6 +48,7 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
 
     fn codegen_static(&mut self, def_id: DefId) {
         let symbol = self.static_symbol(def_id);
+        let (linkage, visibility) = self.static_symbol_attrs(def_id);
         let ty = self.tcx.type_of(def_id).instantiate_identity();
         let layout = self.layout_of(ty);
         let alloc = self.tcx.eval_static_initializer(def_id).unwrap_or_else(|err| {
@@ -119,10 +120,12 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
                     self.mcx.arena().alloc(CTyKind::Struct(struct_name)),
                 ));
                 let init = self.mcx.alloc_str(&format!("{{ {}, {} }}", value_expr_text(ptr), len));
-                self.mcx.module().push_decl(self.mcx.var(
+                self.mcx.module().push_decl(self.mcx.var_with_attrs(
                     CValue::Func(symbol),
                     static_ty,
                     Some(self.mcx.value(CValue::Func(init))),
+                    linkage,
+                    visibility,
                 ));
             }
             _ => {
@@ -137,10 +140,12 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
                 ));
                 let init_bytes = if bytes.is_empty() { &[0u8][..] } else { bytes };
                 let init = self.mcx.alloc_str(&bytes_initializer(init_bytes));
-                self.mcx.module().push_decl(self.mcx.var(
+                self.mcx.module().push_decl(self.mcx.var_with_attrs(
                     CValue::Func(symbol),
                     array_ty,
                     Some(self.mcx.value(CValue::Func(init))),
+                    linkage,
+                    visibility,
                 ));
             }
         }

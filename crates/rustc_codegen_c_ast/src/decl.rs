@@ -2,6 +2,7 @@
 
 use crate::expr::{CExpr, CValue};
 use crate::pretty::{Print, PrinterCtx, INDENT};
+use crate::symbol::{CLinkage, CVisibility};
 use crate::ty::{print_declarator, CTy};
 use crate::ModuleCtx;
 
@@ -16,7 +17,13 @@ pub enum CDeclKind<'mx> {
     /// Example:
     /// - `int foo;` // `ty val`
     /// - `int foo = bar` `ty val = expr`
-    Var { name: CValue<'mx>, ty: CTy<'mx>, init: Option<CExpr<'mx>> },
+    Var {
+        name: CValue<'mx>,
+        ty: CTy<'mx>,
+        init: Option<CExpr<'mx>>,
+        linkage: CLinkage,
+        visibility: CVisibility,
+    },
 }
 
 impl<'mx> ModuleCtx<'mx> {
@@ -27,15 +34,33 @@ impl<'mx> ModuleCtx<'mx> {
 
     /// Create a new variable declaration.
     pub fn var(self, name: CValue<'mx>, ty: CTy<'mx>, init: Option<CExpr<'mx>>) -> CDecl<'mx> {
-        self.decl(CDeclKind::Var { name, ty, init })
+        self.var_with_attrs(name, ty, init, CLinkage::External, CVisibility::Default)
+    }
+
+    /// Create a new variable declaration with explicit linkage and visibility.
+    pub fn var_with_attrs(
+        self,
+        name: CValue<'mx>,
+        ty: CTy<'mx>,
+        init: Option<CExpr<'mx>>,
+        linkage: CLinkage,
+        visibility: CVisibility,
+    ) -> CDecl<'mx> {
+        self.decl(CDeclKind::Var { name, ty, init, linkage, visibility })
     }
 }
 
 impl Print for CDecl<'_> {
     fn print_to(&self, ctx: &mut PrinterCtx) {
         match self {
-            CDeclKind::Var { name, ty, init } => {
+            CDeclKind::Var { name, ty, init, linkage, visibility } => {
                 ctx.ibox(INDENT, |ctx| {
+                    if *linkage == CLinkage::Internal {
+                        ctx.word("static ");
+                    }
+                    if *visibility == CVisibility::Hidden {
+                        ctx.word("__attribute__((visibility(\"hidden\"))) ");
+                    }
                     print_declarator(*ty, Some(*name), ctx);
                     if let Some(init) = init {
                         ctx.word(" =");

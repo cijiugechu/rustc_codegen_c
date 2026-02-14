@@ -1,4 +1,5 @@
 use rustc_codegen_c_ast::func::CFuncKind;
+use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
 use rustc_codegen_ssa::traits::PreDefineCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_hir::attrs::Linkage;
@@ -13,6 +14,18 @@ fn is_always_false_intrinsic(symbol_name: &str) -> bool {
     symbol_name.contains("is_val_statically_known")
 }
 
+fn c_symbol_attrs(linkage: Linkage, visibility: Visibility) -> (CLinkage, CVisibility) {
+    let c_linkage = match linkage {
+        Linkage::Internal => CLinkage::Internal,
+        _ => CLinkage::External,
+    };
+    let c_visibility = match visibility {
+        Visibility::Hidden => CVisibility::Hidden,
+        _ => CVisibility::Default,
+    };
+    (c_linkage, c_visibility)
+}
+
 impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn predefine_static(
         &mut self,
@@ -21,8 +34,9 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         visibility: Visibility,
         symbol_name: &str,
     ) {
-        let _ = (linkage, visibility);
+        let (c_linkage, c_visibility) = c_symbol_attrs(linkage, visibility);
         self.register_static_symbol(def_id, symbol_name);
+        self.register_static_symbol_attrs(def_id, c_linkage, c_visibility);
     }
 
     fn predefine_fn(
@@ -32,12 +46,15 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         visibility: Visibility,
         symbol_name: &str,
     ) {
+        let (c_linkage, c_visibility) = c_symbol_attrs(linkage, visibility);
         let fn_abi = self.fn_abi_of_instance(instance, ty::List::empty());
         let mut signature = self.fn_abi_to_c_signature(fn_abi);
         let is_printf = self.apply_known_symbol_signature_overrides(symbol_name, &mut signature);
         let args = signature.param_tys();
         let (symbol_name, link_name) = self.declaration_symbol_names(symbol_name);
         let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), signature.ret, args)
+            .with_linkage(c_linkage)
+            .with_visibility(c_visibility)
             .with_link_name(link_name.as_ref().map(|name| self.mcx.alloc_str(name)));
         let func = Interned::new_unchecked(self.mcx.func(func));
 

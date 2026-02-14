@@ -1,5 +1,6 @@
 use rustc_abi::{Float as AbiFloat, Primitive};
 use rustc_codegen_c_ast::expr::CValue;
+use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
 use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods};
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
@@ -298,10 +299,12 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
             self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::Usize), words)),
         ));
         let init = self.mcx.alloc_str(&format!("{{ {} }}", entries.join(", ")));
-        self.mcx.module().push_decl(self.mcx.var(
+        self.mcx.module().push_decl(self.mcx.var_with_attrs(
             CValue::Func(symbol),
             static_ty,
             Some(self.mcx.value(CValue::Func(init))),
+            CLinkage::Internal,
+            CVisibility::Default,
         ));
 
         let ptr_expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));

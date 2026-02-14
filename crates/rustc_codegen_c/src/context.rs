@@ -9,6 +9,7 @@ use rustc_abi::{HasDataLayout, Reg, RegKind, Size, TargetDataLayout};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::func::CFunc;
+use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::{BackendTypes, LayoutTypeCodegenMethods};
@@ -142,6 +143,8 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub eh_personality_fn: RefCell<Option<CFunc<'mx>>>,
     /// Mapping from Rust static definitions to their generated C symbols.
     pub static_symbols: RefCell<FxHashMap<DefId, &'mx str>>,
+    /// Mapping from Rust static definitions to their C symbol linkage and visibility.
+    pub static_symbol_attrs: RefCell<FxHashMap<DefId, (CLinkage, CVisibility)>>,
     /// Monotonic counter for assigning unique identities to typed scalar constants.
     pub scalar_ids: Cell<u64>,
     /// Per-function value type cache shared across basic blocks.
@@ -187,6 +190,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             vtables: RefCell::new(FxHashMap::default()),
             eh_personality_fn: RefCell::new(None),
             static_symbols: RefCell::new(FxHashMap::default()),
+            static_symbol_attrs: RefCell::new(FxHashMap::default()),
             scalar_ids: Cell::new(0),
             value_tys: RefCell::new(FxHashMap::default()),
             current_fkey: Cell::new(None),
@@ -231,6 +235,23 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let instance = Instance::mono(self.tcx, def_id);
         self.register_static_symbol(def_id, self.tcx.symbol_name(instance).name)
+    }
+
+    pub(crate) fn register_static_symbol_attrs(
+        &self,
+        def_id: DefId,
+        linkage: CLinkage,
+        visibility: CVisibility,
+    ) {
+        self.static_symbol_attrs.borrow_mut().insert(def_id, (linkage, visibility));
+    }
+
+    pub(crate) fn static_symbol_attrs(&self, def_id: DefId) -> (CLinkage, CVisibility) {
+        self.static_symbol_attrs
+            .borrow()
+            .get(&def_id)
+            .copied()
+            .unwrap_or((CLinkage::External, CVisibility::Default))
     }
 
     /// Returns the C declaration name and optional extern link name for a Rust symbol.

@@ -8,6 +8,7 @@ use rustc_data_structures::intern::Interned;
 use crate::expr::CValue;
 use crate::pretty::{Print, PrinterCtx};
 use crate::stmt::{print_compound, CStmt};
+use crate::symbol::{CLinkage, CVisibility};
 use crate::ty::{print_declarator, CTy};
 use crate::ModuleCtx;
 
@@ -21,6 +22,10 @@ pub struct CFuncKind<'mx> {
     pub name: &'mx str,
     /// Optional link symbol name emitted on declarations.
     pub link_name: Option<&'mx str>,
+    /// Linkage for this symbol.
+    pub linkage: CLinkage,
+    /// Visibility for this symbol.
+    pub visibility: CVisibility,
     /// Return type.
     pub ty: CTy<'mx>,
     /// Function parameters.
@@ -50,6 +55,8 @@ impl<'mx> CFuncKind<'mx> {
         Self {
             name,
             link_name: None,
+            linkage: CLinkage::External,
+            visibility: CVisibility::Default,
             ty,
             params,
             body: RefCell::new(Vec::new()),
@@ -62,6 +69,18 @@ impl<'mx> CFuncKind<'mx> {
     /// Set the link symbol name used for declarations.
     pub fn with_link_name(mut self, link_name: Option<&'mx str>) -> Self {
         self.link_name = link_name;
+        self
+    }
+
+    /// Set linkage for this function.
+    pub fn with_linkage(mut self, linkage: CLinkage) -> Self {
+        self.linkage = linkage;
+        self
+    }
+
+    /// Set visibility for this function.
+    pub fn with_visibility(mut self, visibility: CVisibility) -> Self {
+        self.visibility = visibility;
         self
     }
 
@@ -135,6 +154,12 @@ fn c_string_literal(raw: &str) -> String {
 
 fn print_signature(func: CFunc, ctx: &mut PrinterCtx, with_link_name: bool) {
     ctx.ibox(0, |ctx| {
+        if func.0.linkage == CLinkage::Internal {
+            ctx.word("static ");
+        }
+        if func.0.visibility == CVisibility::Hidden {
+            ctx.word("__attribute__((visibility(\"hidden\"))) ");
+        }
         print_declarator(func.0.ty, Some(CValue::Func(func.0.name)), ctx);
 
         ctx.valign_delim(("(", ")"), |ctx| {
