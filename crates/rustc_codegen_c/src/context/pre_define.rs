@@ -33,41 +33,11 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         symbol_name: &str,
     ) {
         let fn_abi = self.fn_abi_of_instance(instance, ty::List::empty());
-        let (mut ret, mut args) = self.fn_abi_to_c_signature(fn_abi);
-
-        if symbol_name == "malloc" {
-            ret =
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                )));
-            args =
-                vec![rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize)];
-        } else if symbol_name == "realloc" {
-            ret =
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                )));
-            args = vec![
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                ))),
-                rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize),
-            ];
-        } else if symbol_name == "free" {
-            ret = rustc_codegen_c_ast::ty::CTy::Void;
-            args = vec![rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(
-                self.mcx.arena().alloc(rustc_codegen_c_ast::ty::CTyKind::Pointer(
-                    rustc_codegen_c_ast::ty::CTy::Void,
-                )),
-            ))];
-        } else if symbol_name == "printf" {
-            ret = rustc_codegen_c_ast::ty::CTy::Int(rustc_codegen_c_ast::ty::CIntTy::I32);
-            args = vec![];
-        }
-
-        let is_printf = symbol_name == "printf";
+        let mut signature = self.fn_abi_to_c_signature(fn_abi);
+        let is_printf = self.apply_known_symbol_signature_overrides(symbol_name, &mut signature);
+        let args = signature.param_tys();
         let (symbol_name, link_name) = self.declaration_symbol_names(symbol_name);
-        let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
+        let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), signature.ret, args)
             .with_link_name(link_name.as_ref().map(|name| self.mcx.alloc_str(name)));
         let func = Interned::new_unchecked(self.mcx.func(func));
 

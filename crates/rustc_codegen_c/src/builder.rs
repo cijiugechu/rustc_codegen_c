@@ -1037,7 +1037,13 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         let expr = if let Some(lvalue) = self.pointer_lvalue(ptr) {
             match self.pointer_pointee_ty(ptr) {
                 Some(pointee) if pointee == ty => lvalue,
-                _ => self.mcx.cast(ty, lvalue),
+                _ => {
+                    // `ptr` may be tracked as a byte lvalue (e.g. after ptradd). When loading a
+                    // wider/different type, cast the pointer itself and dereference, rather than
+                    // casting the lvalue value.
+                    let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));
+                    self.mcx.unary("*", cast_ptr)
+                }
             }
         } else {
             let cast_ptr = self.mcx.cast(self.pointer_to(ty), self.mcx.value(ptr));

@@ -3,7 +3,7 @@ use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{
-    ConstCodegenMethods, LayoutTypeCodegenMethods, StaticCodegenMethods,
+    ConstCodegenMethods, LayoutTypeCodegenMethods, MiscCodegenMethods, StaticCodegenMethods,
 };
 use rustc_data_structures::intern::Interned;
 use rustc_hir::def_id::DefId;
@@ -78,7 +78,7 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
                 let base_ptr = match self.tcx.global_alloc(ptr_prov.alloc_id()) {
                     GlobalAlloc::Memory(target_alloc) => self.const_data_from_alloc(target_alloc),
                     GlobalAlloc::Function { instance, .. } => {
-                        self.symbol_value(self.tcx.symbol_name(instance).name)
+                        CValue::Func(self.get_fn(instance).0.name)
                     }
                     GlobalAlloc::Static(target_def_id) => {
                         let target_symbol = self.static_symbol(target_def_id);

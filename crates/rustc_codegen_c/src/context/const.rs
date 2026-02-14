@@ -1,6 +1,6 @@
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::traits::{ConstCodegenMethods, StaticCodegenMethods};
+use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods};
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 use rustc_data_structures::intern::Interned;
 use rustc_middle::mir::interpret::{read_target_uint, GlobalAlloc};
@@ -77,9 +77,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     fn global_alloc_base_value(&self, alloc: GlobalAlloc<'tcx>) -> CValue<'mx> {
         match alloc {
             GlobalAlloc::Memory(alloc) => self.const_data_from_alloc(alloc),
-            GlobalAlloc::Function { instance, .. } => {
-                self.symbol_value(self.tcx.symbol_name(instance).name)
-            }
+            GlobalAlloc::Function { instance, .. } => CValue::Func(self.get_fn(instance).0.name),
             GlobalAlloc::Static(def_id) => {
                 let symbol = self.static_symbol(def_id);
                 let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));

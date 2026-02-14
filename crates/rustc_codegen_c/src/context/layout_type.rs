@@ -220,7 +220,8 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             return ty;
         }
 
-        let name = self.mcx.alloc_str(&format!("__rcgenc_closure_{}", self.next_synthetic_type_id()));
+        let name =
+            self.mcx.alloc_str(&format!("__rcgenc_closure_{}", self.next_synthetic_type_id()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
 
         let field_count = layout.fields.count();
@@ -297,8 +298,11 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     }
 
     fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {
-        let (ret, params) = self.fn_abi_to_c_signature(fn_abi);
-        CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Function { ret, params })))
+        let signature = self.fn_abi_to_c_signature(fn_abi);
+        let params = signature.param_tys();
+        CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Function { ret: signature.ret, params }),
+        ))
     }
 
     fn fn_ptr_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type {

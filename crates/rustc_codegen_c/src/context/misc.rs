@@ -2,15 +2,16 @@ use std::cell::RefCell;
 
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::{CFunc, CFuncKind};
-use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind};
+use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::MiscCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_hash::FxHashMap;
 use rustc_middle::ty::layout::{FnAbiOf, HasTypingEnv};
 use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty};
 use rustc_span::DUMMY_SP;
+use rustc_target::callconv::FnAbi;
 
-use crate::context::CodegenCx;
+use crate::context::{CAbiSignature, CodegenCx};
 
 fn is_always_false_intrinsic(symbol_name: &str) -> bool {
     symbol_name.contains("is_val_statically_known")
@@ -33,6 +34,77 @@ fn function_signature_from_type<'mx>(fn_type: CTy<'mx>) -> (CTy<'mx>, Vec<CTy<'m
     }
 }
 
+impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
+    fn declare_c_func_with_signature(
+        &self,
+        name: &str,
+        link_name: Option<String>,
+        signature: &CAbiSignature<'mx>,
+    ) -> CFunc<'mx> {
+        let params = signature.param_tys();
+        Interned::new_unchecked(
+            self.mcx.func(
+                CFuncKind::new(self.mcx.alloc_str(name), signature.ret, params)
+                    .with_link_name(link_name.as_deref().map(|name| self.mcx.alloc_str(name))),
+            ),
+        )
+    }
+
+    fn declare_indirect_return_bridge(
+        &self,
+        symbol_name: &str,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        lowered_signature: &CAbiSignature<'mx>,
+    ) -> CFunc<'mx> {
+        let native_signature = self.fn_abi_to_native_c_signature(fn_abi);
+        let (decl_name, _) = self.declaration_symbol_names(symbol_name);
+        let link_name = Some(self.symbol_object_link_name(symbol_name));
+
+        let native_decl_name =
+            format!("__rcgenc_native_{}_{}", decl_name, self.next_synthetic_type_id());
+        let native_func =
+            self.declare_c_func_with_signature(&native_decl_name, link_name, &native_signature);
+        self.mcx.module().push_func(native_func);
+
+        let bridge_name =
+            format!("__rcgenc_sret_bridge_{}_{}", decl_name, self.next_synthetic_type_id());
+        let bridge_func = self.declare_c_func_with_signature(&bridge_name, None, lowered_signature);
+
+        let call_args = lowered_signature
+            .params
+            .iter()
+            .enumerate()
+            .skip(1)
+            .map(|(idx, _)| self.mcx.value(CValue::Local(idx)))
+            .collect::<Vec<_>>();
+        let call_expr = self.mcx.call(self.mcx.value(CValue::Func(native_func.0.name)), call_args);
+        let call_tmp = bridge_func.0.next_local_var();
+        bridge_func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            call_tmp,
+            native_signature.ret,
+            Some(call_expr),
+        )));
+
+        let ret_size = fn_abi.ret.layout.size.bytes();
+        if ret_size != 0 {
+            let u8_ptr_ty = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+            ));
+            let dst_ptr = self.mcx.cast(u8_ptr_ty, self.mcx.value(CValue::Local(0)));
+            let src_ptr = self.mcx.cast(u8_ptr_ty, self.mcx.unary("&", self.mcx.value(call_tmp)));
+            let copy_expr = self.mcx.call(
+                self.mcx.value(CValue::Func("__builtin_memcpy")),
+                vec![dst_ptr, src_ptr, self.mcx.value(CValue::Scalar(ret_size as i128))],
+            );
+            bridge_func.0.push_stmt(self.mcx.expr_stmt(copy_expr));
+        }
+
+        bridge_func.0.push_stmt(self.mcx.ret(None));
+        self.mcx.module().push_func(bridge_func);
+        bridge_func
+    }
+}
+
 impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn vtables(
         &self,
@@ -46,54 +118,22 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         }
 
         let fn_abi = self.fn_abi_of_instance(instance, rustc_middle::ty::List::empty());
-        let (mut ret, mut args) = self.fn_abi_to_c_signature(fn_abi);
-
         let symbol_name = self.tcx.symbol_name(instance).name;
-        let is_printf = symbol_name == "printf";
-        if symbol_name == "malloc" {
-            ret =
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                )));
-            args =
-                vec![rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize)];
-        } else if symbol_name == "realloc" {
-            ret =
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                )));
-            args = vec![
-                rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(
-                    rustc_codegen_c_ast::ty::CTyKind::Pointer(rustc_codegen_c_ast::ty::CTy::Void),
-                ))),
-                rustc_codegen_c_ast::ty::CTy::UInt(rustc_codegen_c_ast::ty::CUintTy::Usize),
-            ];
-        } else if symbol_name == "free" {
-            ret = rustc_codegen_c_ast::ty::CTy::Void;
-            args = vec![rustc_codegen_c_ast::ty::CTy::Ref(Interned::new_unchecked(
-                self.mcx.arena().alloc(rustc_codegen_c_ast::ty::CTyKind::Pointer(
-                    rustc_codegen_c_ast::ty::CTy::Void,
-                )),
-            ))];
-        } else if symbol_name == "printf" {
-            ret = rustc_codegen_c_ast::ty::CTy::Int(rustc_codegen_c_ast::ty::CIntTy::I32);
-            args = vec![];
-        }
+        let mut signature = self.fn_abi_to_c_signature(fn_abi);
+        let is_printf = self.apply_known_symbol_signature_overrides(symbol_name, &mut signature);
 
-        let (symbol_name, link_name) = self.declaration_symbol_names(symbol_name);
+        let (func, already_emitted) = if signature.has_struct_return() {
+            (self.declare_indirect_return_bridge(symbol_name, fn_abi, &signature), true)
+        } else {
+            let (decl_name, link_name) = self.declaration_symbol_names(symbol_name);
+            (self.declare_c_func_with_signature(&decl_name, link_name, &signature), false)
+        };
 
-        let func: CFunc<'mx> = Interned::new_unchecked(
-            self.mcx.func(
-                CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
-                    .with_link_name(link_name.as_ref().map(|name| self.mcx.alloc_str(name))),
-            ),
-        );
-
-        if is_always_false_intrinsic(symbol_name.as_str()) {
+        if is_always_false_intrinsic(symbol_name) {
             func.0.push_stmt(self.mcx.ret(Some(self.mcx.value(CValue::Scalar(0)))));
         }
 
-        if !is_printf {
+        if !is_printf && !already_emitted {
             self.mcx.module().push_func(func);
         }
         self.function_instances.borrow_mut().insert(instance, func);

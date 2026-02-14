@@ -20,7 +20,7 @@ use rustc_middle::ty::layout::{
     TyAndLayout,
 };
 use rustc_middle::ty::{ExistentialTraitRef, Instance, Ty, TyCtxt};
-use rustc_target::callconv::{FnAbi, PassMode};
+use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 use rustc_type_ir::TyKind;
 
@@ -74,6 +74,40 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
     Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
     Struct(&'mx str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CAbiParamRole {
+    StructReturn,
+    Regular,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CAbiParam<'mx> {
+    pub role: CAbiParamRole,
+    pub ty: CTy<'mx>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CAbiSignature<'mx> {
+    pub ret: CTy<'mx>,
+    pub params: Vec<CAbiParam<'mx>>,
+}
+
+impl<'mx> CAbiSignature<'mx> {
+    pub(crate) fn has_struct_return(&self) -> bool {
+        self.params.first().is_some_and(|param| param.role == CAbiParamRole::StructReturn)
+    }
+
+    pub(crate) fn param_tys(&self) -> Vec<CTy<'mx>> {
+        self.params.iter().map(|param| param.ty).collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CAbiSignatureFlavor {
+    LoweredRust,
+    NativeC,
 }
 
 impl PartialEq for CBasicBlock<'_> {
@@ -206,13 +240,60 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         let sanitized = sanitize_symbol_name(symbol_name);
         let link_name = if sanitized == symbol_name {
             None
-        } else if self.tcx.sess.target.options.is_like_darwin {
-            // Mach-O symbols have a leading underscore in the object symbol table.
-            Some(format!("_{symbol_name}"))
         } else {
-            Some(symbol_name.to_string())
+            Some(self.symbol_object_link_name(symbol_name))
         };
         (sanitized, link_name)
+    }
+
+    pub(crate) fn symbol_object_link_name(&self, symbol_name: &str) -> String {
+        if self.tcx.sess.target.options.is_like_darwin {
+            // Mach-O symbols have a leading underscore in the object symbol table.
+            format!("_{symbol_name}")
+        } else {
+            symbol_name.to_string()
+        }
+    }
+
+    pub(crate) fn void_ptr_ty(&self) -> CTy<'mx> {
+        CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Pointer(CTy::Void)),
+        ))
+    }
+
+    pub(crate) fn apply_known_symbol_signature_overrides(
+        &self,
+        symbol_name: &str,
+        signature: &mut CAbiSignature<'mx>,
+    ) -> bool {
+        match symbol_name {
+            "malloc" => {
+                signature.ret = self.void_ptr_ty();
+                signature.params =
+                    vec![CAbiParam { role: CAbiParamRole::Regular, ty: CTy::UInt(CUintTy::Usize) }];
+                false
+            }
+            "realloc" => {
+                signature.ret = self.void_ptr_ty();
+                signature.params = vec![
+                    CAbiParam { role: CAbiParamRole::Regular, ty: self.void_ptr_ty() },
+                    CAbiParam { role: CAbiParamRole::Regular, ty: CTy::UInt(CUintTy::Usize) },
+                ];
+                false
+            }
+            "free" => {
+                signature.ret = CTy::Void;
+                signature.params =
+                    vec![CAbiParam { role: CAbiParamRole::Regular, ty: self.void_ptr_ty() }];
+                false
+            }
+            "printf" => {
+                signature.ret = CTy::Int(CIntTy::I32);
+                signature.params.clear();
+                true
+            }
+            _ => false,
+        }
     }
 
     fn predeclare_repr_c_structs(&self) {
@@ -308,50 +389,111 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         ))
     }
 
-    pub(crate) fn fn_abi_to_c_signature(
-        &self,
-        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
-    ) -> (CTy<'mx>, Vec<CTy<'mx>>) {
-        let mut args = Vec::new();
-        if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
-            args.push(self.indirect_ptr_ty_for_layout(fn_abi.ret.layout));
-        }
-        for arg in fn_abi.args.iter() {
-            match arg.mode {
-                PassMode::Ignore => {}
-                PassMode::Direct(_) => args.push(self.immediate_backend_type(arg.layout)),
-                PassMode::Pair(_, _) => {
-                    args.push(self.scalar_pair_element_backend_type(arg.layout, 0, true));
-                    args.push(self.scalar_pair_element_backend_type(arg.layout, 1, true));
+    fn arg_abi_to_c_params(&self, arg: &ArgAbi<'tcx, Ty<'tcx>>, out: &mut Vec<CAbiParam<'mx>>) {
+        match arg.mode {
+            PassMode::Ignore => {}
+            PassMode::Direct(_) => out.push(CAbiParam {
+                role: CAbiParamRole::Regular,
+                ty: self.immediate_backend_type(arg.layout),
+            }),
+            PassMode::Pair(_, _) => {
+                out.push(CAbiParam {
+                    role: CAbiParamRole::Regular,
+                    ty: self.scalar_pair_element_backend_type(arg.layout, 0, true),
+                });
+                out.push(CAbiParam {
+                    role: CAbiParamRole::Regular,
+                    ty: self.scalar_pair_element_backend_type(arg.layout, 1, true),
+                });
+            }
+            PassMode::Cast { ref cast, pad_i32 } => {
+                if pad_i32 {
+                    out.push(CAbiParam {
+                        role: CAbiParamRole::Regular,
+                        ty: CTy::UInt(CUintTy::U32),
+                    });
                 }
-                PassMode::Cast { ref cast, pad_i32 } => {
-                    if pad_i32 {
-                        args.push(CTy::UInt(CUintTy::U32));
-                    }
-                    args.extend(
-                        self.cast_target_to_c_abi_pieces(cast).into_iter().map(|(_, ty)| ty),
-                    );
-                }
-                PassMode::Indirect { meta_attrs: None, .. } => {
-                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
-                }
-                PassMode::Indirect { meta_attrs: Some(_), .. } => {
-                    args.push(self.indirect_ptr_ty_for_layout(arg.layout));
-                    args.push(self.thin_ptr_u8_ty());
-                }
+                out.extend(
+                    self.cast_target_to_c_abi_pieces(cast)
+                        .into_iter()
+                        .map(|(_, ty)| CAbiParam { role: CAbiParamRole::Regular, ty }),
+                );
+            }
+            PassMode::Indirect { meta_attrs: None, .. } => out.push(CAbiParam {
+                role: CAbiParamRole::Regular,
+                ty: self.indirect_ptr_ty_for_layout(arg.layout),
+            }),
+            PassMode::Indirect { meta_attrs: Some(_), .. } => {
+                out.push(CAbiParam {
+                    role: CAbiParamRole::Regular,
+                    ty: self.indirect_ptr_ty_for_layout(arg.layout),
+                });
+                out.push(CAbiParam { role: CAbiParamRole::Regular, ty: self.thin_ptr_u8_ty() });
             }
         }
+    }
 
-        let ret = match fn_abi.ret.mode {
-            PassMode::Ignore | PassMode::Indirect { .. } => CTy::Void,
-            PassMode::Direct(_) => self.immediate_backend_type(fn_abi.ret.layout),
-            PassMode::Pair(_, _) => self.abi_tuple_ty(&[
+    fn forced_indirect_return_ty(&self, layout: TyAndLayout<'tcx>) -> CTy<'mx> {
+        let storage = self.backend_type(layout);
+        // Force C compilers to lower this call with an explicit return slot (sret-like path).
+        let pad = self.abi_tuple_ty(&[
+            CTy::UInt(CUintTy::U64),
+            CTy::UInt(CUintTy::U64),
+            CTy::UInt(CUintTy::U64),
+            CTy::UInt(CUintTy::U64),
+        ]);
+        self.abi_tuple_ty(&[storage, pad])
+    }
+
+    pub(crate) fn fn_abi_to_c_signature_with_flavor(
+        &self,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+        flavor: CAbiSignatureFlavor,
+    ) -> CAbiSignature<'mx> {
+        let mut params = Vec::new();
+        if matches!(flavor, CAbiSignatureFlavor::LoweredRust)
+            && matches!(fn_abi.ret.mode, PassMode::Indirect { .. })
+        {
+            params.push(CAbiParam {
+                role: CAbiParamRole::StructReturn,
+                ty: self.indirect_ptr_ty_for_layout(fn_abi.ret.layout),
+            });
+        }
+        for arg in fn_abi.args.iter() {
+            self.arg_abi_to_c_params(arg, &mut params);
+        }
+
+        let ret = match (flavor, &fn_abi.ret.mode) {
+            (CAbiSignatureFlavor::LoweredRust, PassMode::Ignore | PassMode::Indirect { .. }) => {
+                CTy::Void
+            }
+            (CAbiSignatureFlavor::NativeC, PassMode::Ignore) => CTy::Void,
+            (CAbiSignatureFlavor::NativeC, PassMode::Indirect { .. }) => {
+                self.forced_indirect_return_ty(fn_abi.ret.layout)
+            }
+            (_, PassMode::Direct(_)) => self.immediate_backend_type(fn_abi.ret.layout),
+            (_, PassMode::Pair(_, _)) => self.abi_tuple_ty(&[
                 self.scalar_pair_element_backend_type(fn_abi.ret.layout, 0, true),
                 self.scalar_pair_element_backend_type(fn_abi.ret.layout, 1, true),
             ]),
-            PassMode::Cast { ref cast, pad_i32: _ } => self.cast_backend_type(cast),
+            (_, PassMode::Cast { cast, pad_i32: _ }) => self.cast_backend_type(cast),
         };
-        (ret, args)
+
+        CAbiSignature { ret, params }
+    }
+
+    pub(crate) fn fn_abi_to_c_signature(
+        &self,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+    ) -> CAbiSignature<'mx> {
+        self.fn_abi_to_c_signature_with_flavor(fn_abi, CAbiSignatureFlavor::LoweredRust)
+    }
+
+    pub(crate) fn fn_abi_to_native_c_signature(
+        &self,
+        fn_abi: &FnAbi<'tcx, Ty<'tcx>>,
+    ) -> CAbiSignature<'mx> {
+        self.fn_abi_to_c_signature_with_flavor(fn_abi, CAbiSignatureFlavor::NativeC)
     }
 
     pub(crate) fn abi_tuple_ty(&self, fields: &[CTy<'mx>]) -> CTy<'mx> {
