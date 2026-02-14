@@ -38,6 +38,9 @@ fn build_c_compiler_command(
         .arg("-o")
         .arg(obj_out)
         .arg("-c");
+    if !backend_config.c_stack_protector {
+        cmd.arg("-fno-stack-protector");
+    }
     if backend_config.c_lto {
         cmd.arg("-flto");
     }

@@ -3,6 +3,10 @@
 pub struct BackendConfig {
     /// Enable C toolchain LTO (`-flto`) for C compilation.
     pub c_lto: bool,
+    /// Enable C stack protector instrumentation.
+    ///
+    /// Defaults to `false` to match Rust's default behavior.
+    pub c_stack_protector: bool,
 }
 
 impl BackendConfig {
@@ -11,11 +15,16 @@ impl BackendConfig {
     /// Supported options:
     /// - `c-lto`
     /// - `c-lto=yes|no|true|false|1|0|on|off`
+    /// - `c-stack-protector`
+    /// - `c-stack-protector=yes|no|true|false|1|0|on|off`
     ///
-    /// `CG_C_LTO=1` is accepted as an env fallback.
+    /// `CG_C_LTO=1` and `CG_C_STACK_PROTECTOR=1` are accepted as env fallbacks.
     pub fn from_opts(opts: &[String]) -> Result<Self, String> {
         let mut config = BackendConfig {
             c_lto: std::env::var("CG_C_LTO")
+                .ok()
+                .is_some_and(|v| parse_bool_flag(&v).unwrap_or(false)),
+            c_stack_protector: std::env::var("CG_C_STACK_PROTECTOR")
                 .ok()
                 .is_some_and(|v| parse_bool_flag(&v).unwrap_or(false)),
         };
@@ -42,6 +51,31 @@ impl BackendConfig {
             if let Some(value) = opt.strip_prefix("cg-c-lto=") {
                 config.c_lto = parse_bool_flag(value).ok_or_else(|| {
                     format!("invalid value for `cg-c-lto`: `{value}` (expected bool-like value)")
+                })?;
+                continue;
+            }
+
+            // Keep `cg-c-stack-protector` as a compatibility alias while preferring
+            // `c-stack-protector`.
+            if opt == "c-stack-protector" || opt == "cg-c-stack-protector" {
+                config.c_stack_protector = true;
+                continue;
+            }
+
+            if let Some(value) = opt.strip_prefix("c-stack-protector=") {
+                config.c_stack_protector = parse_bool_flag(value).ok_or_else(|| {
+                    format!(
+                        "invalid value for `c-stack-protector`: `{value}` (expected bool-like value)"
+                    )
+                })?;
+                continue;
+            }
+
+            if let Some(value) = opt.strip_prefix("cg-c-stack-protector=") {
+                config.c_stack_protector = parse_bool_flag(value).ok_or_else(|| {
+                    format!(
+                        "invalid value for `cg-c-stack-protector`: `{value}` (expected bool-like value)"
+                    )
                 })?;
                 continue;
             }
