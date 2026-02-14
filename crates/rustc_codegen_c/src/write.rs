@@ -1,12 +1,48 @@
 use std::fs;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use rustc_codegen_ssa::back::write::{CodegenContext, ModuleConfig};
 use rustc_codegen_ssa::{CompiledModule, ModuleCodegen};
 use rustc_errors::DiagCtxtHandle;
-use rustc_session::config::OutputType;
+use rustc_session::config::{OptLevel, OutputType};
 use tracing::error;
+
+use crate::config::BackendConfig;
+
+fn c_opt_flag_from_rust_opt_level(level: OptLevel) -> &'static str {
+    match level {
+        OptLevel::No => "-O0",
+        OptLevel::Less => "-O1",
+        OptLevel::More => "-O2",
+        OptLevel::Aggressive => "-O3",
+        OptLevel::Size => "-Os",
+        OptLevel::SizeMin => "-Oz",
+    }
+}
+
+fn build_c_compiler_command(
+    cgcx: &CodegenContext<crate::CCodegen>,
+    backend_config: BackendConfig,
+    c_out: &Path,
+    obj_out: &Path,
+) -> Command {
+    let cc = std::env::var("CC")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| "clang".to_string());
+    let mut cmd = Command::new(cc);
+    cmd.arg(c_opt_flag_from_rust_opt_level(cgcx.opts.optimize))
+        .arg(c_out)
+        .arg("-o")
+        .arg(obj_out)
+        .arg("-c");
+    if backend_config.c_lto {
+        cmd.arg("-flto");
+    }
+    cmd
+}
 
 pub(crate) fn codegen(
     cgcx: &CodegenContext<crate::CCodegen>,
@@ -15,6 +51,9 @@ pub(crate) fn codegen(
 ) -> CompiledModule {
     let dcx = cgcx.create_dcx();
     let dcx = dcx.handle();
+    let backend_config = BackendConfig::from_opts(&cgcx.opts.cg.llvm_args)
+        .map_err(|err| dcx.fatal(format!("invalid rustc_codegen_c option: {err}")))
+        .unwrap();
     let obj_out = cgcx.output_filenames.temp_path_for_cgu(
         OutputType::Object,
         &module.name,
@@ -35,11 +74,9 @@ pub(crate) fn codegen(
         .unwrap();
 
     // invoke cc to compile
-    // FIXME: configure cc
     // FIXME: handle long command line (windows)
     // FIXME: flush_linked_file (windows)
-    let mut cmd = Command::new("clang");
-    cmd.arg(&c_out).arg("-o").arg(&obj_out).arg("-c");
+    let mut cmd = build_c_compiler_command(cgcx, backend_config, &c_out, &obj_out);
     let output = match cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

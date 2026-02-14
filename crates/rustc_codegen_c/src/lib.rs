@@ -46,6 +46,7 @@ mod allocator;
 mod archive;
 mod base;
 mod builder;
+mod config;
 mod context;
 mod write;
 

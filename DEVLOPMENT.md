@@ -53,6 +53,7 @@ Main commands:
 - `./y test`
 - `./y fmt [--check]`
 - `./y clean`
+- `./y size-compare`
 
 Global options:
 
@@ -142,7 +143,51 @@ This removes:
 - `crates/target`
 - output directory (default: `build`)
 
-## 8. Troubleshooting
+## 8. Binary Size Comparison (Hello World)
+
+Use this to compare binary size between:
+
+- direct `rustc` build
+- `rustc_codegen_c` build (`Rust -> C -> C compiler`)
+
+Run:
+
+```bash
+./y size-compare
+```
+
+Default comparison profile:
+
+- `-C opt-level=z`
+- `-C codegen-units=1`
+- LTO disabled by default on both paths (for toolchain compatibility and stable comparisons)
+- both raw and stripped binaries
+
+Optional tuning:
+
+```bash
+./y size-compare --opt-level z --codegen-units 1
+```
+
+Output files are written to:
+
+- `build/size_compare/report.md`
+- `build/size_compare/report.json`
+
+The reports include:
+
+- `rustc_bytes`
+- `codegen_c_bytes`
+- `delta_bytes` (`codegen_c - rustc`)
+- `delta_percent`
+
+Notes:
+
+- results are machine/toolchain/linker dependent
+- compare trends over time on the same environment for meaningful regression tracking
+- backend env vars follow `CG_*` naming; for example `CG_C_LTO=1` enables C compile `-flto` when needed
+
+## 9. Troubleshooting
 
 ### `FileCheck` not found
 

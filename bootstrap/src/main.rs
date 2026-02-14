@@ -10,6 +10,7 @@ mod clean;
 mod fmt;
 mod manifest;
 mod rustc;
+mod size_compare;
 mod test;
 
 /// Bootstrap system for the rustc codegen c
@@ -42,6 +43,7 @@ pub enum Command {
     Clean(clean::CleanCommand),
     Rustc(rustc::RustcCommand),
     Fmt(fmt::FmtCommand),
+    SizeCompare(size_compare::SizeCompareCommand),
 }
 
 trait Run {
@@ -133,6 +135,10 @@ fn main() {
         Command::Fmt(mut fmt) => {
             fmt.verbose |= cli.verbose;
             fmt.run(&manifest)
+        }
+        Command::SizeCompare(mut size_compare) => {
+            size_compare.verbose |= cli.verbose;
+            size_compare.run(&manifest)
         }
     }
 }
