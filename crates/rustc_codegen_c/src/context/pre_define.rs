@@ -45,6 +45,10 @@ fn declaration_symbol_names<'a>(symbol_name: &'a str) -> (String, Option<&'a str
     (sanitized, link_name)
 }
 
+fn is_always_false_intrinsic(symbol_name: &str) -> bool {
+    symbol_name.contains("is_val_statically_known")
+}
+
 impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
     fn predefine_static(
         &mut self,
@@ -102,6 +106,13 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
             .with_link_name(link_name.map(|name| self.mcx.alloc_str(name)));
         let func = Interned::new_unchecked(self.mcx.func(func));
+
+        if is_always_false_intrinsic(symbol_name.as_str()) {
+            func.0.push_stmt(
+                self.mcx.ret(Some(self.mcx.value(rustc_codegen_c_ast::expr::CValue::Scalar(0)))),
+            );
+        }
+
         if !is_printf {
             self.mcx.module().push_func(func);
         }

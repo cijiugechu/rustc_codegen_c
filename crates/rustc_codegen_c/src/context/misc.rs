@@ -48,6 +48,10 @@ fn declaration_symbol_names<'a>(symbol_name: &'a str) -> (String, Option<&'a str
     (sanitized, link_name)
 }
 
+fn is_always_false_intrinsic(symbol_name: &str) -> bool {
+    symbol_name.contains("is_val_statically_known")
+}
+
 fn function_signature_from_type<'mx>(fn_type: CTy<'mx>) -> (CTy<'mx>, Vec<CTy<'mx>>) {
     match fn_type {
         CTy::Ref(kind) => match kind.0 {
@@ -120,6 +124,11 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                     .with_link_name(link_name.map(|name| self.mcx.alloc_str(name))),
             ),
         );
+
+        if is_always_false_intrinsic(symbol_name.as_str()) {
+            func.0.push_stmt(self.mcx.ret(Some(self.mcx.value(CValue::Scalar(0)))));
+        }
+
         if !is_printf {
             self.mcx.module().push_func(func);
         }
@@ -155,6 +164,9 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                     CFuncKind::new(self.mcx.alloc_str(&symbol_name), CTy::Int(CIntTy::I32), [])
                         .with_link_name(link_name.map(|name| self.mcx.alloc_str(name)));
                 let func = Interned::new_unchecked(self.mcx.func(func));
+                if is_always_false_intrinsic(symbol_name.as_str()) {
+                    func.0.push_stmt(self.mcx.ret(Some(self.mcx.value(CValue::Scalar(0)))));
+                }
                 self.mcx.module().push_func(func);
                 self.function_instances.borrow_mut().insert(instance, func);
                 func
