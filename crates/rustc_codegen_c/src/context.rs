@@ -198,6 +198,23 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         self.register_static_symbol(def_id, self.tcx.symbol_name(instance).name)
     }
 
+    /// Returns the C declaration name and optional extern link name for a Rust symbol.
+    ///
+    /// If the symbol is not a valid C identifier, a sanitized declaration name is generated and
+    /// a link name is emitted to preserve ABI symbol identity.
+    pub(crate) fn declaration_symbol_names(&self, symbol_name: &str) -> (String, Option<String>) {
+        let sanitized = sanitize_symbol_name(symbol_name);
+        let link_name = if sanitized == symbol_name {
+            None
+        } else if self.tcx.sess.target.options.is_like_darwin {
+            // Mach-O symbols have a leading underscore in the object symbol table.
+            Some(format!("_{symbol_name}"))
+        } else {
+            Some(symbol_name.to_string())
+        };
+        (sanitized, link_name)
+    }
+
     fn predeclare_repr_c_structs(&self) {
         for def_id in self.tcx.hir_crate_items(()).definitions() {
             if self.tcx.def_kind(def_id) != DefKind::Struct {
@@ -518,7 +535,7 @@ fn is_valid_c_identifier(name: &str) -> bool {
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn sanitize_symbol_name(symbol_name: &str) -> String {
+pub(crate) fn sanitize_symbol_name(symbol_name: &str) -> String {
     if is_valid_c_identifier(symbol_name) {
         return symbol_name.to_string();
     }

@@ -9,42 +9,6 @@ use rustc_middle::ty::{self, Instance};
 
 use crate::context::CodegenCx;
 
-fn is_valid_c_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn sanitize_symbol_name(symbol_name: &str) -> String {
-    if is_valid_c_identifier(symbol_name) {
-        return symbol_name.to_string();
-    }
-
-    let mut out = String::from("__rcgenc_");
-    for byte in symbol_name.bytes() {
-        if byte.is_ascii_alphanumeric() {
-            out.push(byte as char);
-        } else {
-            use std::fmt::Write;
-            let _ = write!(&mut out, "_{byte:02X}");
-        }
-    }
-    out
-}
-
-fn declaration_symbol_names<'a>(symbol_name: &'a str) -> (String, Option<&'a str>) {
-    let sanitized = sanitize_symbol_name(symbol_name);
-    let link_name = if sanitized == symbol_name { None } else { Some(symbol_name) };
-    (sanitized, link_name)
-}
-
 fn is_always_false_intrinsic(symbol_name: &str) -> bool {
     symbol_name.contains("is_val_statically_known")
 }
@@ -102,9 +66,9 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         }
 
         let is_printf = symbol_name == "printf";
-        let (symbol_name, link_name) = declaration_symbol_names(symbol_name);
+        let (symbol_name, link_name) = self.declaration_symbol_names(symbol_name);
         let func = CFuncKind::new(self.mcx.alloc_str(&symbol_name), ret, args)
-            .with_link_name(link_name.map(|name| self.mcx.alloc_str(name)));
+            .with_link_name(link_name.as_ref().map(|name| self.mcx.alloc_str(name)));
         let func = Interned::new_unchecked(self.mcx.func(func));
 
         if is_always_false_intrinsic(symbol_name.as_str()) {

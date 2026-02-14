@@ -6,37 +6,7 @@ use rustc_data_structures::intern::Interned;
 use rustc_middle::mir::interpret::{read_target_uint, GlobalAlloc};
 use rustc_type_ir::{IntTy, UintTy};
 
-use crate::context::CodegenCx;
-
-fn is_valid_c_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-fn sanitize_symbol_name(symbol_name: &str) -> String {
-    if is_valid_c_identifier(symbol_name) {
-        return symbol_name.to_string();
-    }
-
-    let mut out = String::from("__rcgenc_");
-    for byte in symbol_name.bytes() {
-        if byte.is_ascii_alphanumeric() {
-            out.push(byte as char);
-        } else {
-            use std::fmt::Write;
-            let _ = write!(&mut out, "_{byte:02X}");
-        }
-    }
-    out
-}
+use crate::context::{sanitize_symbol_name, CodegenCx};
 
 fn c_string_literal_from_bytes(bytes: &[u8]) -> String {
     use std::fmt::Write;
