@@ -1,2 +1,4 @@
 /build
 rustc-ice-*
+/tests/cargo/*/target/
+/tests/cargo/*/Cargo.lock
