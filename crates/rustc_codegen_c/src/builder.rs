@@ -2053,6 +2053,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn apply_attrs_to_cleanup_callsite(&mut self, llret: Self::Value) {
-        todo!()
+        // C backend does not model callsite attributes; cleanup-callsite attrs are
+        // optimization hints and can be ignored.
+        let _ = llret;
     }
 }
