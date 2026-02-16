@@ -1310,6 +1310,20 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 }
                 continue;
             }
+
+            // The first index on a pointer-to-struct is element stepping (array semantics),
+            // not a field projection. Keep the pointee type as the same struct.
+            if i == 0 && matches!(projected_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)))
+            {
+                let idx_expr = if let Some(index) = const_index {
+                    self.mcx.value(CValue::Scalar(index as i128))
+                } else {
+                    self.mcx.value(*index)
+                };
+                expr = self.mcx.index(expr, idx_expr);
+                projected = true;
+                continue;
+            }
             projected = true;
 
             projected_ty = match projected_ty {
