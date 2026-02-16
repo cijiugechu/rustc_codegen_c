@@ -10,6 +10,7 @@ use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use which::which;
 
+use crate::cargo::configure_cargo_command_env;
 use crate::manifest::Manifest;
 use crate::Run;
 
@@ -62,6 +63,7 @@ impl Run for TestCommand {
             }
         }
         self.command_status("cargo", &mut command);
+        self.run_cargo_mod_smoke(manifest);
 
         let testcases = self.collect_testcases(manifest);
         self.log_action_start(&format!("found {} testcases", testcases.len()), "");
@@ -125,6 +127,14 @@ impl TestCommand {
             }
             TestType::FileCheck => unreachable!("filecheck cases are handled in parallel"),
         }
+    }
+
+    fn run_cargo_mod_smoke(&self, manifest: &Manifest) {
+        self.log_action_start("TEST Cargo smoke", "tests/cargo/mod_smoke");
+        let mut command = std::process::Command::new("cargo");
+        command.args(["build", "--manifest-path", "tests/cargo/mod_smoke/Cargo.toml"]);
+        configure_cargo_command_env(&mut command, manifest);
+        self.command_status("cargo smoke", &mut command);
     }
 
     pub fn collect_testcases(&self, manifest: &Manifest) -> Vec<TestCase> {

@@ -14,11 +14,13 @@ This code is still highly experimental and not ready for production use.
 In the root directory of the project, run the following command:
 
 ```bash
-./y rustc examples/basic_math.rs
-./build/basic_math
+./y cargo build --manifest-path tests/cargo/mod_smoke/Cargo.toml
 ```
 
 The usage of `./y` can be viewed from `./y help`.
+
+`./y rustc <source.rs>` is still available for compatibility, but `./y cargo <args...>` is the
+recommended path.
 
 Note: only Linux is supported at the moment. `clang` is required to compile C code, 
 and LLVM FileCheck is required to test the codegen.

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anstream::eprintln as println;
@@ -33,6 +33,22 @@ impl Manifest {
         } else {
             PathBuf::from("crates/target/debug").join(filename)
         }
+    }
+
+    pub fn backend_rustflags(&self) -> Vec<String> {
+        vec![
+            format!("-Zcodegen-backend={}", absolute_path(&self.codegen_backend()).display()),
+            "-Cpanic=abort".to_string(),
+            "-Clto=false".to_string(),
+            "-Coverflow-checks=off".to_string(),
+            format!("-Lall={}", absolute_path(&self.out_dir).display()),
+            "-Clink-arg=-lc".to_string(),
+            "-Clink-arg=-lrust_runtime".to_string(),
+        ]
+    }
+
+    pub fn runtime_c_include_flag(&self) -> String {
+        format!("-I{}", absolute_path(Path::new("rust_runtime")).display())
     }
 
     /// The command to run rustc with the codegen backend
@@ -110,5 +126,15 @@ impl Run for PrepareAction {
 
     fn verbose(&self) -> bool {
         self.verbose
+    }
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|e| panic!("failed to get current dir: {e}"))
+            .join(path)
     }
 }

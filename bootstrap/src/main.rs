@@ -6,6 +6,7 @@ use color_print::cprintln;
 
 use crate::manifest::Manifest;
 
+mod cargo;
 mod clean;
 mod fmt;
 mod manifest;
@@ -40,6 +41,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     Test(test::TestCommand),
+    Cargo(cargo::CargoCommand),
     Clean(clean::CleanCommand),
     Rustc(rustc::RustcCommand),
     Fmt(fmt::FmtCommand),
@@ -123,6 +125,10 @@ fn main() {
         Command::Test(mut test) => {
             test.verbose |= cli.verbose;
             test.run(&manifest)
+        }
+        Command::Cargo(mut cargo) => {
+            cargo.verbose |= cli.verbose;
+            cargo.run(&manifest)
         }
         Command::Clean(mut clean) => {
             clean.verbose |= cli.verbose;

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use clap::Args;
+use color_print::cprintln;
 use regex::Regex;
 
 use crate::manifest::Manifest;
@@ -22,6 +23,9 @@ impl Run for RustcCommand {
     const STEP_DISPLAY_NAME: &'static str = "RUSTC";
 
     fn run(&self, manifest: &Manifest) {
+        cprintln!(
+            "<y>[DEPRECATED]</y> `./y rustc` is compatibility-only; prefer `./y cargo [args...]`."
+        );
         manifest.prepare();
         self.build_auxiliaries(manifest);
 

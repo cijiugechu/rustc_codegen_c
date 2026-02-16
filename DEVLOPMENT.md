@@ -49,11 +49,14 @@ Use `./y` from repository root:
 
 Main commands:
 
+- `./y cargo <cargo-args...>`
 - `./y rustc <source.rs>`
 - `./y test`
 - `./y fmt [--check]`
 - `./y clean`
 - `./y size-compare`
+
+`./y rustc` is kept for compatibility; prefer `./y cargo`.
 
 Global options:
 
@@ -61,20 +64,26 @@ Global options:
 - `--out-dir <dir>`
 - `--verbose`
 
-## 3. Build and Run an Example
+## 3. Build a Cargo Crate with rustc_codegen_c
 
 Example:
 
 ```bash
-./y rustc examples/basic_math.rs
-./build/basic_math
+./y cargo build --manifest-path tests/cargo/mod_smoke/Cargo.toml
 echo $?
 ```
 
 Expected result:
 
-- program exits with code `0`
-- no stdout output for `basic_math` (this example does not print)
+- command exits with code `0`
+- crate contains `mod foo;` split across multiple files
+
+Compatibility path (single source entrypoint) is still available:
+
+```bash
+./y rustc examples/basic_math.rs
+./build/basic_math
+```
 
 ## 4. Run Tests
 
@@ -93,6 +102,7 @@ Run compile/build checks only (skip runtime execution):
 What this includes:
 
 - `cargo test --manifest-path crates/Cargo.toml`
+- cargo smoke build for `tests/cargo/mod_smoke/Cargo.toml`
 - compile checks for `examples/*.rs`
 - codegen checks for `tests/codegen/*.rs` via `FileCheck`
 - blessed output checks for `tests/bless/*.rs`
