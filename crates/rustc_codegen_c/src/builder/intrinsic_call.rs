@@ -1,4 +1,4 @@
-use rustc_codegen_c_ast::ty::{CTy, CUintTy};
+use rustc_codegen_c_ast::ty::{CIntTy, CTy, CUintTy};
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::{
@@ -141,6 +141,31 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(res, ret_ty, Some(init))));
                 self.record_value_ty(res, ret_ty);
                 self.store(res, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
+            sym::compare_bytes => {
+                let a_ptr = args[0].immediate();
+                let b_ptr = args[1].immediate();
+                let size = args[2].immediate();
+
+                self.ensure_alloca_byte_array_decl(a_ptr);
+                self.ensure_alloca_byte_array_decl(b_ptr);
+
+                let void_ptr = self.pointer_to(CTy::Void);
+                let a_ptr = self.mcx.cast(void_ptr, self.mcx.value(a_ptr));
+                let b_ptr = self.mcx.cast(void_ptr, self.mcx.value(b_ptr));
+                let size = match self.value_ty(size) {
+                    Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(size),
+                    _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(size)),
+                };
+
+                let cmp = self.mcx.call(self.mcx.raw("__builtin_memcmp"), vec![a_ptr, b_ptr, size]);
+                let ret_ty = CTy::Int(CIntTy::I32);
+                let ret = self.bb.func.0.next_local_var();
+                let cmp = self.mcx.cast(ret_ty, cmp);
+                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(cmp))));
+                self.record_value_ty(ret, ret_ty);
+                self.store(ret, llresult.val.llval, llresult.val.align);
                 Ok(())
             }
             _ => Err(instance),
