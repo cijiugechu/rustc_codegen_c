@@ -21,6 +21,7 @@ struct Outer {
 }
 
 // CHECK-LABEL: main
+// CHECK: int8_t _{{[0-9]+}}[
 #[no_mangle]
 pub fn main() -> i32 {
     let arr = [

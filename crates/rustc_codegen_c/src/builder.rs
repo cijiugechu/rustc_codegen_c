@@ -405,6 +405,26 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.cx.struct_layouts.borrow().get(&ty).cloned()
     }
 
+    fn alloca_byte_array_ty(&self, bytes: usize) -> CTy<'mx> {
+        CTy::Ref(Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes.max(1))),
+        ))
+    }
+
+    fn mark_alloca_prefer_bytes(&mut self, ptr: CValue<'mx>) {
+        let fkey = self.fkey();
+        let Some(slot) = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied() else {
+            return;
+        };
+        if slot.declared || slot.prefer_bytes {
+            return;
+        }
+        self.cx.pending_allocas.borrow_mut().insert(
+            (fkey, ptr),
+            PendingAlloca { prefer_bytes: true, ..slot },
+        );
+    }
+
     fn ensure_alloca_decl(&mut self, ptr: CValue<'mx>, suggested_ty: Option<CTy<'mx>>) {
         let fkey = self.bb.func.0 as *const _ as usize;
         let Some(slot) = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied() else {
@@ -414,37 +434,23 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             return;
         }
 
-        let decl_ty = match suggested_ty {
+        let decl_ty = if slot.prefer_bytes {
+            self.alloca_byte_array_ty(slot.bytes)
+        } else {
+            match suggested_ty {
             Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _)) => CTy::Ref(kind),
-            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Struct(_)) => {
-                let struct_ty = CTy::Ref(kind);
-                let info = self
-                    .struct_layout_info(struct_ty)
-                    .unwrap_or_else(|| panic!("missing struct layout metadata for {struct_ty:?}"));
-                if slot.bytes % info.size == 0 {
-                    CTy::Ref(Interned::new_unchecked(
-                        self.mcx
-                            .arena()
-                            .alloc(CTyKind::Array(struct_ty, (slot.bytes / info.size).max(1))),
-                    ))
-                } else {
-                    CTy::Ref(Interned::new_unchecked(
-                        self.mcx
-                            .arena()
-                            .alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), slot.bytes.max(1))),
-                    ))
+                // Keep stack slots conservative for struct-like projections: represent storage as
+                // bytes and rely on typed casts at use sites.
+                Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Struct(_)) => {
+                    self.alloca_byte_array_ty(slot.bytes)
                 }
-            }
             Some(other) => self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
                 // When the suggested element type doesn't tile the stack slot, fall back to a
                 // byte array and rely on typed loads/stores through explicit casts.
-                CTy::Ref(Interned::new_unchecked(
-                    self.mcx
-                        .arena()
-                        .alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), slot.bytes.max(1))),
-                ))
+                self.alloca_byte_array_ty(slot.bytes)
             }),
             None => panic!("cannot infer alloca declaration type for {ptr:?}"),
+            }
         };
 
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ptr, decl_ty, None)));
@@ -547,9 +553,8 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         let Some(bytes) = self.pending_alloca_bytes(ptr) else {
             return;
         };
-        let decl_ty = CTy::Ref(Interned::new_unchecked(
-            self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), bytes.max(1))),
-        ));
+        self.mark_alloca_prefer_bytes(ptr);
+        let decl_ty = self.alloca_byte_array_ty(bytes);
         self.ensure_alloca_decl(ptr, Some(decl_ty));
     }
 
@@ -1098,7 +1103,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         self.cx
             .pending_allocas
             .borrow_mut()
-            .insert((fkey, ret), PendingAlloca { bytes, declared: false });
+            .insert((fkey, ret), PendingAlloca { bytes, declared: false, prefer_bytes: false });
         ret
     }
 
@@ -1403,10 +1408,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 )))
             })
         });
-        let suggested_decl_ty = match ty {
-            CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)) => Some(ty),
-            _ => inferred_decl_ty.or(Some(ty)),
-        };
+        let suggested_decl_ty = inferred_decl_ty.or(Some(ty));
         self.ensure_alloca_decl(ptr, suggested_decl_ty);
 
         let ret = self.bb.func.0.next_local_var();
@@ -1909,6 +1911,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
         if let Some(fn_abi) = fn_abi {
+            for value in args.iter().copied() {
+                self.mark_alloca_prefer_bytes(value);
+            }
             if matches!(fn_abi.ret.mode, PassMode::Indirect { .. }) {
                 if let Some(ret_ptr) = args.first().copied() {
                     self.ensure_alloca_decl(ret_ptr, Some(self.cx.backend_type(fn_abi.ret.layout)));

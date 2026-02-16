@@ -45,6 +45,7 @@ pub struct CBasicBlock<'mx> {
 pub struct PendingAlloca {
     pub bytes: usize,
     pub declared: bool,
+    pub prefer_bytes: bool,
 }
 
 #[derive(Debug, Clone)]
