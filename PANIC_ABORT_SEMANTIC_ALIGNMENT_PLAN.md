@@ -126,7 +126,7 @@ Completion:
   `catch_switch`.
 - Implemented `tail_call` by reusing call lowering and emitting return according to `PassMode`.
 
-### Phase C: Inline ASM Unwind Handling
+### Phase C: Inline ASM Unwind Handling (Done)
 
 Tasks in `crates/rustc_codegen_c/src/builder/asm.rs`:
 
@@ -136,6 +136,13 @@ Tasks in `crates/rustc_codegen_c/src/builder/asm.rs`:
 Acceptance:
 
 - Inline asm path no longer panics on unimplemented code for supported abort-only usage.
+
+Completion:
+
+- Backend inline-asm path no longer uses `todo!()`.
+- Non-unwinding inline asm is fail-fast diagnosed at compile time.
+- Unwind/catch-funclet inline asm is fail-fast diagnosed at compile time.
+- Added unit tests for inline-asm policy classification.
 
 ### Phase D: Tests and Regression Coverage
 
