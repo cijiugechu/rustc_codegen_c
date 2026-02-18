@@ -1,14 +1,109 @@
+use rustc_abi::{Align, BackendRepr, Size};
+use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CUintTy};
+use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::{
     BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods, LayoutTypeCodegenMethods,
 };
-use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::Instance;
 use rustc_span::sym;
 
 use crate::builder::Builder;
+
+impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
+    fn raw_eq_use_fast_path(&self, layout: TyAndLayout<'tcx>, pointer_size: u64) -> bool {
+        match layout.backend_repr {
+            BackendRepr::Scalar(_) | BackendRepr::ScalarPair(_, _) => true,
+            BackendRepr::Memory { .. } => layout.size.bytes() <= pointer_size * 2,
+            BackendRepr::SimdVector { .. } => false,
+        }
+    }
+
+    fn pick_chunk(remaining: u64, align_bytes: u64, offset: u64) -> u64 {
+        for chunk in [8, 4, 2, 1] {
+            if chunk <= remaining && align_bytes % chunk == 0 && offset % chunk == 0 {
+                return chunk;
+            }
+        }
+        1
+    }
+
+    fn raw_eq_fast_compare_chunks(
+        &mut self,
+        lhs_ptr: CValue<'mx>,
+        rhs_ptr: CValue<'mx>,
+        size_bytes: u64,
+        align: Align,
+    ) -> CValue<'mx> {
+        if size_bytes == 0 {
+            return self.const_bool(true);
+        }
+
+        let mut offset = 0u64;
+        let mut all_equal = None;
+        while offset < size_bytes {
+            let remaining = size_bytes - offset;
+            let chunk = Self::pick_chunk(remaining, align.bytes() as u64, offset);
+            let chunk_ty = match chunk {
+                8 => CTy::UInt(CUintTy::U64),
+                4 => CTy::UInt(CUintTy::U32),
+                2 => CTy::UInt(CUintTy::U16),
+                1 => CTy::UInt(CUintTy::U8),
+                _ => unreachable!(),
+            };
+
+            let lhs_chunk_ptr = if offset == 0 {
+                lhs_ptr
+            } else {
+                self.inbounds_ptradd(lhs_ptr, self.const_usize(offset))
+            };
+            let rhs_chunk_ptr = if offset == 0 {
+                rhs_ptr
+            } else {
+                self.inbounds_ptradd(rhs_ptr, self.const_usize(offset))
+            };
+            let chunk_align = align.restrict_for_offset(Size::from_bytes(offset));
+            let lhs_chunk = self.load(chunk_ty, lhs_chunk_ptr, chunk_align);
+            let rhs_chunk = self.load(chunk_ty, rhs_chunk_ptr, chunk_align);
+            let eq = self.icmp(IntPredicate::IntEQ, lhs_chunk, rhs_chunk);
+
+            all_equal = Some(match all_equal {
+                Some(prev) => self.and(prev, eq),
+                None => eq,
+            });
+            offset += chunk;
+        }
+
+        all_equal.unwrap_or_else(|| self.const_bool(true))
+    }
+
+    fn raw_eq_memcmp(
+        &mut self,
+        lhs_ptr: CValue<'mx>,
+        rhs_ptr: CValue<'mx>,
+        size_bytes: u64,
+    ) -> CValue<'mx> {
+        self.ensure_alloca_byte_array_decl(lhs_ptr);
+        self.ensure_alloca_byte_array_decl(rhs_ptr);
+
+        let void_ptr = self.pointer_to(CTy::Void);
+        let lhs_ptr = self.mcx.cast(void_ptr, self.mcx.value(lhs_ptr));
+        let rhs_ptr = self.mcx.cast(void_ptr, self.mcx.value(rhs_ptr));
+        let size = self.mcx.value(self.const_usize(size_bytes));
+        let cmp = self.mcx.call(self.mcx.raw("__builtin_memcmp"), vec![lhs_ptr, rhs_ptr, size]);
+        let cmp = self.mcx.cast(CTy::Int(CIntTy::I32), cmp);
+        let cmp_val = self.bb.func.0.next_local_var();
+        self.bb
+            .func
+            .0
+            .push_stmt(self.mcx.decl_stmt(self.mcx.var(cmp_val, CTy::Int(CIntTy::I32), Some(cmp))));
+        self.record_value_ty(cmp_val, CTy::Int(CIntTy::I32));
+        self.icmp(IntPredicate::IntEQ, cmp_val, self.const_i32(0))
+    }
+}
 
 impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
     fn codegen_intrinsic_call(
@@ -166,6 +261,34 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ret_ty, Some(cmp))));
                 self.record_value_ty(ret, ret_ty);
                 self.store(ret, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
+            sym::raw_eq => {
+                let pointee_ty = fn_args.type_at(0);
+                let layout = self.layout_of(pointee_ty);
+                if !layout.is_sized() {
+                    self.tcx
+                        .sess
+                        .dcx()
+                        .span_fatal(span, "raw_eq requires a sized pointee type");
+                }
+
+                let lhs_ptr = args[0].immediate();
+                let rhs_ptr = args[1].immediate();
+                let size_bytes = layout.size.bytes();
+
+                let is_equal = if size_bytes == 0 {
+                    self.const_bool(true)
+                } else {
+                    let pointer_size = self.tcx.data_layout.pointer_size().bytes();
+                    if self.raw_eq_use_fast_path(layout, pointer_size) {
+                        self.raw_eq_fast_compare_chunks(lhs_ptr, rhs_ptr, size_bytes, layout.align.abi)
+                    } else {
+                        self.raw_eq_memcmp(lhs_ptr, rhs_ptr, size_bytes)
+                    }
+                };
+
+                self.store(is_equal, llresult.val.llval, llresult.val.align);
                 Ok(())
             }
             _ => Err(instance),
