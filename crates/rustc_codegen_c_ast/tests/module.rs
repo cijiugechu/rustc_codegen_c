@@ -13,7 +13,7 @@ mod blessed_test;
 fn test_module() {
     printer_test("test_module", |ctx| {
         let module = ctx.module();
-        module.push_include("stdio.h");
+        module.require_system_include("stdio.h");
 
         module.push_decl(ctx.var(CValue::Local(42), ctx.get_int_type(IntTy::I32), None));
 

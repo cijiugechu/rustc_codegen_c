@@ -22,6 +22,7 @@ pub mod cstruct;
 pub mod decl;
 pub mod expr;
 pub mod func;
+pub mod include;
 pub mod module;
 pub mod pretty;
 pub mod stmt;

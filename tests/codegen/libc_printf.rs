@@ -10,6 +10,7 @@
 
 extern crate mini_core;
 
+// CHECK: #include <stdio.h>
 // CHECK-LABEL: main
 // CHECK: printf
 #[no_mangle]

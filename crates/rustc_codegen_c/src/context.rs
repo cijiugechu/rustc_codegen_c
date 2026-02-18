@@ -25,6 +25,9 @@ use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 use rustc_type_ir::TyKind;
 
+use crate::config::BackendConfig;
+use crate::include_plan::{IncludeCapability, IncludePlanner};
+
 mod asm;
 mod base_type;
 mod r#const;
@@ -180,10 +183,19 @@ pub struct CodegenCx<'tcx, 'mx> {
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     pub fn new(tcx: TyCtxt<'tcx>, mcx: ModuleCtx<'mx>) -> Self {
-        mcx.module().push_include("stdint.h");
-        mcx.module().push_include("stddef.h");
-        mcx.module().push_include("stdlib.h");
-        mcx.module().push_include("stdio.h");
+        let backend_config = BackendConfig::from_opts(&tcx.sess.opts.cg.llvm_args)
+            .map_err(|err| tcx.sess.dcx().fatal(format!("invalid rustc_codegen_c option: {err}")))
+            .unwrap();
+
+        let mut include_planner = IncludePlanner::new(backend_config.c_std);
+        include_planner.require(IncludeCapability::StdIntTypes);
+        include_planner.require(IncludeCapability::SizeTypes);
+        include_planner.require(IncludeCapability::AbortApi);
+        include_planner
+            .apply_to_module(mcx.module())
+            .map_err(|err| tcx.sess.dcx().fatal(err))
+            .unwrap();
+
         let cx = Self {
             tcx,
             mcx,
@@ -311,6 +323,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 false
             }
             "printf" => {
+                self.mcx.module().require_system_include("stdio.h");
                 signature.ret = CTy::Int(CIntTy::I32);
                 signature.params.clear();
                 true

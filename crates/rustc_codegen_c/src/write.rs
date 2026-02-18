@@ -23,7 +23,7 @@ fn c_opt_flag_from_rust_opt_level(level: OptLevel) -> &'static str {
 }
 
 fn build_c_compiler_command(
-    cgcx: &CodegenContext<crate::CCodegen>,
+    opt_level: OptLevel,
     backend_config: BackendConfig,
     c_out: &Path,
     obj_out: &Path,
@@ -33,11 +33,12 @@ fn build_c_compiler_command(
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "clang".to_string());
     let mut cmd = Command::new(cc);
-    cmd.arg(c_opt_flag_from_rust_opt_level(cgcx.opts.optimize))
+    cmd.arg(c_opt_flag_from_rust_opt_level(opt_level))
         .arg(c_out)
         .arg("-o")
         .arg(obj_out)
-        .arg("-c");
+        .arg("-c")
+        .arg(format!("-std={}", backend_config.c_std.as_flag()));
     if !backend_config.c_stack_protector {
         cmd.arg("-fno-stack-protector");
     }
@@ -79,7 +80,7 @@ pub(crate) fn codegen(
     // invoke cc to compile
     // FIXME: handle long command line (windows)
     // FIXME: flush_linked_file (windows)
-    let mut cmd = build_c_compiler_command(cgcx, backend_config, &c_out, &obj_out);
+    let mut cmd = build_c_compiler_command(cgcx.opts.optimize, backend_config, &c_out, &obj_out);
     let output = match cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -108,6 +109,30 @@ pub(crate) fn codegen(
         &cgcx.output_filenames,
         cgcx.invocation_temp.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use rustc_session::config::OptLevel;
+
+    use super::build_c_compiler_command;
+    use crate::config::{BackendConfig, CStandard};
+
+    #[test]
+    fn build_command_includes_c_std_flag() {
+        let cfg = BackendConfig { c_std: CStandard::Gnu17, ..BackendConfig::default() };
+        let cmd = build_c_compiler_command(
+            OptLevel::No,
+            cfg,
+            Path::new("input.c"),
+            Path::new("output.o"),
+        );
+        let args: Vec<String> =
+            cmd.get_args().map(|arg| arg.to_string_lossy().to_string()).collect();
+        assert!(args.iter().any(|arg| arg == "-std=gnu17"));
+    }
 }
 
 pub(crate) fn link(

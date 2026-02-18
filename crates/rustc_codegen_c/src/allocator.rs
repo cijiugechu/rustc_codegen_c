@@ -4,9 +4,13 @@ use rustc_ast::expand::allocator::{
     alloc_error_handler_name, default_fn_name, global_fn_name, AllocatorKind, AllocatorMethod,
     AllocatorTy, ALLOCATOR_METHODS, NO_ALLOC_SHIM_IS_UNSTABLE,
 };
+use rustc_codegen_c_ast::include::render_include_block;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::OomStrategy;
 use rustc_symbol_mangling::mangle_internal_symbol;
+
+use crate::config::BackendConfig;
+use crate::include_plan::{IncludeCapability, IncludePlanner};
 
 pub(crate) fn codegen(
     tcx: TyCtxt<'_>,
@@ -14,9 +18,20 @@ pub(crate) fn codegen(
     kind: AllocatorKind,
     alloc_error_handler_kind: AllocatorKind,
 ) -> String {
+    let backend_config = BackendConfig::from_opts(&tcx.sess.opts.cg.llvm_args)
+        .map_err(|err| tcx.sess.dcx().fatal(format!("invalid rustc_codegen_c option: {err}")))
+        .unwrap();
+    let mut include_planner = IncludePlanner::new(backend_config.c_std);
+    include_planner.require(IncludeCapability::StdIntTypes);
+    let include_block = include_planner
+        .build_set()
+        .map(|set| render_include_block(&set))
+        .map_err(|err| tcx.sess.dcx().fatal(err))
+        .unwrap();
+
     let mut code = String::new();
-    code.push_str("#include <stdint.h>\n");
-    code.push_str("\n");
+    code.push_str(&include_block);
+    code.push('\n');
 
     if kind == AllocatorKind::Default {
         for method in ALLOCATOR_METHODS {

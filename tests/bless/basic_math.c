@@ -1,8 +1,7 @@
 // file: basic_math.7206e0a37c6be10d-cgu.0.c
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 /* Some helper macros for the generated code */
 

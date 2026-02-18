@@ -49,6 +49,7 @@ mod base;
 mod builder;
 mod config;
 mod context;
+mod include_plan;
 mod write;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
