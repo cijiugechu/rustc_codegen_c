@@ -701,7 +701,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) -> Self::Value {
-        todo!()
+        // In abort-only mode, unwinding edges are unreachable.
+        let _ = catch;
+        let ret = self.call(llty, fn_attrs, fn_abi, llfn, args, funclet, instance);
+        self.br(then);
+        ret
     }
 
     fn unreachable(&mut self) {
@@ -1824,11 +1828,14 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn cleanup_landing_pad(&mut self, pers_fn: Self::Function) -> (Self::Value, Self::Value) {
-        todo!()
+        let _ = pers_fn;
+        self.unreachable();
+        (CValue::Scalar(0), CValue::Scalar(0))
     }
 
     fn filter_landing_pad(&mut self, pers_fn: Self::Function) {
-        todo!()
+        let _ = pers_fn;
+        self.unreachable();
     }
 
     fn resume(&mut self, exn0: Self::Value, exn1: Self::Value) {
@@ -1837,15 +1844,18 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn cleanup_pad(&mut self, parent: Option<Self::Value>, args: &[Self::Value]) -> Self::Funclet {
-        todo!()
+        let _ = (parent, args);
+        self.unreachable();
     }
 
     fn cleanup_ret(&mut self, funclet: &Self::Funclet, unwind: Option<Self::BasicBlock>) {
-        todo!()
+        let _ = (funclet, unwind);
+        self.unreachable();
     }
 
     fn catch_pad(&mut self, parent: Self::Value, args: &[Self::Value]) -> Self::Funclet {
-        todo!()
+        let _ = (parent, args);
+        self.unreachable();
     }
 
     fn catch_switch(
@@ -1854,7 +1864,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         unwind: Option<Self::BasicBlock>,
         handlers: &[Self::BasicBlock],
     ) -> Self::Value {
-        todo!()
+        let _ = (parent, unwind, handlers);
+        self.unreachable();
+        CValue::Scalar(0)
     }
 
     fn atomic_cmpxchg(
@@ -2045,7 +2057,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         funclet: Option<&Self::Funclet>,
         instance: Option<rustc_middle::ty::Instance<'tcx>>,
     ) {
-        todo!()
+        let call = self.call(llty, fn_attrs, Some(fn_abi), llfn, args, funclet, instance);
+        match fn_abi.ret.mode {
+            PassMode::Ignore | PassMode::Indirect { .. } => self.ret_void(),
+            PassMode::Direct(_) | PassMode::Pair(_, _) | PassMode::Cast { .. } => self.ret(call),
+        }
     }
 
     fn zext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {

@@ -97,7 +97,7 @@ Completion:
 - Normalized bootstrap rustflags by stripping pre-existing panic flags before backend injection.
 - Added/updated unit tests for panic strategy validation and rustflag normalization behavior.
 
-### Phase B: Complete Abort-only Call/Unwind Lowering
+### Phase B: Complete Abort-only Call/Unwind Lowering (Done)
 
 Tasks in `crates/rustc_codegen_c/src/builder.rs`:
 
@@ -117,6 +117,14 @@ Acceptance:
 
 - No `todo!()` remains in the EH/call-control methods above.
 - Existing callsites compile and run in abort-only mode.
+
+Completion:
+
+- Replaced `invoke` with abort-only lowering (`call` + branch to `then`).
+- Implemented abort-unreachable behavior for cleanup/catch EH methods:
+  `cleanup_landing_pad`, `filter_landing_pad`, `cleanup_pad`, `cleanup_ret`, `catch_pad`,
+  `catch_switch`.
+- Implemented `tail_call` by reusing call lowering and emitting return according to `PassMode`.
 
 ### Phase C: Inline ASM Unwind Handling
 
