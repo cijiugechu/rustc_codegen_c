@@ -39,7 +39,7 @@ impl Run for CargoCommand {
 pub(crate) fn configure_cargo_command_env(command: &mut Command, manifest: &Manifest) {
     let encoded_rustflags = std::env::var("CARGO_ENCODED_RUSTFLAGS").ok();
     let rustflags = std::env::var("RUSTFLAGS").ok();
-    let mut merged_rustflags = strip_codegen_backend_flags(rustflags_from_vars(
+    let mut merged_rustflags = strip_codegen_backend_and_panic_flags(rustflags_from_vars(
         encoded_rustflags.as_deref(),
         rustflags.as_deref(),
     ));
@@ -67,19 +67,24 @@ fn rustflags_from_vars(encoded: Option<&str>, plain: Option<&str>) -> Vec<String
         .collect()
 }
 
-fn strip_codegen_backend_flags(flags: Vec<String>) -> Vec<String> {
+fn strip_codegen_backend_and_panic_flags(flags: Vec<String>) -> Vec<String> {
     let mut out = Vec::with_capacity(flags.len());
     let mut i = 0;
     while i < flags.len() {
         let flag = &flags[i];
 
-        if flag.starts_with("-Zcodegen-backend=") {
+        if flag.starts_with("-Zcodegen-backend=") || flag.starts_with("-Cpanic=") {
             i += 1;
             continue;
         }
 
         if flag == "-Z" && flags.get(i + 1).is_some_and(|next| next.starts_with("codegen-backend="))
         {
+            i += 2;
+            continue;
+        }
+
+        if flag == "-C" && flags.get(i + 1).is_some_and(|next| next.starts_with("panic=")) {
             i += 2;
             continue;
         }
@@ -108,7 +113,7 @@ fn merge_cflags(existing: Option<&str>, include_flag: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_cflags, rustflags_from_vars, strip_codegen_backend_flags};
+    use super::{merge_cflags, rustflags_from_vars, strip_codegen_backend_and_panic_flags};
 
     #[test]
     fn rustflags_prefers_encoded_over_plain() {
@@ -117,17 +122,35 @@ mod tests {
     }
 
     #[test]
-    fn strip_codegen_backend_replaces_both_forms() {
+    fn strip_codegen_backend_and_panic_replaces_both_forms() {
         let flags = vec![
             "-Cdebuginfo=2".to_string(),
             "-Zcodegen-backend=old".to_string(),
             "-Z".to_string(),
             "codegen-backend=older".to_string(),
             "-Cpanic=abort".to_string(),
+            "-C".to_string(),
+            "panic=unwind".to_string(),
         ];
 
-        let stripped = strip_codegen_backend_flags(flags);
-        assert_eq!(stripped, vec!["-Cdebuginfo=2", "-Cpanic=abort"]);
+        let stripped = strip_codegen_backend_and_panic_flags(flags);
+        assert_eq!(stripped, vec!["-Cdebuginfo=2"]);
+    }
+
+    #[test]
+    fn strip_codegen_backend_and_panic_preserves_other_codegen_flags() {
+        let flags = vec![
+            "-C".to_string(),
+            "debuginfo=2".to_string(),
+            "-Copt-level=2".to_string(),
+            "-Z".to_string(),
+            "codegen-backend=old".to_string(),
+            "-C".to_string(),
+            "panic=abort".to_string(),
+        ];
+
+        let stripped = strip_codegen_backend_and_panic_flags(flags);
+        assert_eq!(stripped, vec!["-C", "debuginfo=2", "-Copt-level=2"]);
     }
 
     #[test]

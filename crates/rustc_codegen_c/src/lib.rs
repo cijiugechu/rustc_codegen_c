@@ -41,6 +41,7 @@ use rustc_middle::ty::TyCtxt;
 use rustc_middle::util::Providers;
 use rustc_session::config::{OptLevel, OutputFilenames};
 use rustc_session::Session;
+use rustc_target::spec::PanicStrategy;
 
 mod allocator;
 mod archive;
@@ -54,6 +55,23 @@ rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
 #[derive(Clone)]
 pub struct CCodegen {}
+
+const PANIC_ABORT_REQUIRED_MSG: &str =
+    "rustc_codegen_c currently supports only `panic=abort`.";
+
+fn validate_panic_strategy(strategy: PanicStrategy) -> Result<(), &'static str> {
+    if matches!(strategy, PanicStrategy::Abort) {
+        Ok(())
+    } else {
+        Err(PANIC_ABORT_REQUIRED_MSG)
+    }
+}
+
+fn enforce_panic_abort(tcx: TyCtxt<'_>) {
+    if let Err(msg) = validate_panic_strategy(tcx.sess.panic_strategy()) {
+        tcx.sess.dcx().fatal(msg);
+    }
+}
 
 impl CodegenBackend for CCodegen {
     fn locale_resource(&self) -> &'static str {
@@ -117,6 +135,8 @@ impl CodegenBackend for CCodegen {
     }
 
     fn codegen_crate(&self, tcx: TyCtxt<'_>) -> Box<dyn std::any::Any> {
+        enforce_panic_abort(tcx);
+
         let target_cpu = match tcx.sess.opts.cg.target_cpu {
             Some(ref name) => name,
             None => tcx.sess.target.cpu.as_ref(),
@@ -259,4 +279,20 @@ impl WriteBackendMethods for CCodegen {
 #[no_mangle]
 pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
     Box::new(CCodegen {})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PANIC_ABORT_REQUIRED_MSG, validate_panic_strategy};
+    use rustc_target::spec::PanicStrategy;
+
+    #[test]
+    fn validate_panic_strategy_accepts_abort() {
+        assert!(validate_panic_strategy(PanicStrategy::Abort).is_ok());
+    }
+
+    #[test]
+    fn validate_panic_strategy_rejects_unwind() {
+        assert_eq!(validate_panic_strategy(PanicStrategy::Unwind), Err(PANIC_ABORT_REQUIRED_MSG));
+    }
 }
