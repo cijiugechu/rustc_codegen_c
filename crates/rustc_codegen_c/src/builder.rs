@@ -1235,12 +1235,18 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
             self.mcx.unary("*", cast_ptr)
         };
+        let store_is_pointer = matches!(store_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_)));
+        let scalar_literal = matches!(val, CValue::Scalar(_) | CValue::ScalarTyped(_, _));
         let rhs = match val_ty {
+            Some(val_ty) if val_ty == store_ty && store_is_pointer && scalar_literal => {
+                self.mcx.cast(store_ty, self.mcx.value(val))
+            }
             Some(val_ty) if val_ty == store_ty => self.mcx.value(val),
             Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(elem, 1) if *elem == store_ty) => {
                 self.mcx.index(self.mcx.value(val), self.mcx.value(CValue::Scalar(0)))
             }
             Some(_) => self.mcx.cast(store_ty, self.mcx.value(val)),
+            None if store_is_pointer && scalar_literal => self.mcx.cast(store_ty, self.mcx.value(val)),
             None => self.mcx.value(val),
         };
         let assign = self.mcx.binary(lhs, rhs, "=");
