@@ -27,7 +27,7 @@ pub enum CStandard {
 
 impl Default for CStandard {
     fn default() -> Self {
-        Self::C99
+        Self::C11
     }
 }
 
@@ -240,6 +240,15 @@ mod tests {
         let opts = vec!["c-std=gnu17".to_string()];
         let cfg = BackendConfig::from_opts(&opts).unwrap();
         assert_eq!(cfg.c_std, CStandard::Gnu17);
+        restore_env(prev);
+    }
+
+    #[test]
+    fn parse_c_std_default_is_c11() {
+        let _guard = env_lock();
+        let prev = swap_env(None);
+        let cfg = BackendConfig::from_opts(&[]).unwrap();
+        assert_eq!(cfg.c_std, CStandard::C11);
         restore_env(prev);
     }
 

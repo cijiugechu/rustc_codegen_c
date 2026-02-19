@@ -25,7 +25,7 @@ use rustc_target::callconv::{ArgAbi, FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 use rustc_type_ir::TyKind;
 
-use crate::config::BackendConfig;
+use crate::config::{BackendConfig, CStandard};
 use crate::include_plan::{IncludeCapability, IncludePlanner};
 
 mod asm;
@@ -137,6 +137,8 @@ impl Hash for CBasicBlock<'_> {
 pub struct CodegenCx<'tcx, 'mx> {
     /// The type context. See [`TyCtxt`].
     pub tcx: TyCtxt<'tcx>,
+    /// Active backend configuration C language standard.
+    pub c_std: CStandard,
     /// The output and context for the outputed module.
     pub mcx: ModuleCtx<'mx>,
     /// Mapping from Rust function instances to their corresponding C functions.
@@ -198,6 +200,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let cx = Self {
             tcx,
+            c_std: backend_config.c_std,
             mcx,
             function_instances: RefCell::new(FxHashMap::default()),
             vtables: RefCell::new(FxHashMap::default()),
@@ -222,6 +225,15 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         };
         cx.predeclare_repr_c_structs();
         cx
+    }
+
+    pub(crate) fn require_include_capability(&self, capability: IncludeCapability) {
+        let mut include_planner = IncludePlanner::new(self.c_std);
+        include_planner.require(capability);
+        include_planner
+            .apply_to_module(self.mcx.module())
+            .map_err(|err| self.tcx.sess.dcx().fatal(err))
+            .unwrap();
     }
 
     pub(crate) fn next_synthetic_type_id(&self) -> usize {

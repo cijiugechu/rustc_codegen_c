@@ -10,10 +10,7 @@ const INLINE_ASM_UNSUPPORTED_MSG: &str =
 const INLINE_ASM_UNWIND_UNSUPPORTED_MSG: &str =
     "rustc_codegen_c doesn't support unwinding from inline assembly.";
 
-fn validate_inline_asm_policy(
-    options: InlineAsmOptions,
-    has_catch_funclet: bool,
-) -> &'static str {
+fn validate_inline_asm_policy(options: InlineAsmOptions, has_catch_funclet: bool) -> &'static str {
     if options.contains(InlineAsmOptions::MAY_UNWIND) || has_catch_funclet {
         INLINE_ASM_UNWIND_UNSUPPORTED_MSG
     } else {
@@ -47,7 +44,7 @@ impl<'tcx, 'mx> AsmBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
 #[cfg(test)]
 mod tests {
     use super::{
-        INLINE_ASM_UNSUPPORTED_MSG, INLINE_ASM_UNWIND_UNSUPPORTED_MSG, validate_inline_asm_policy,
+        validate_inline_asm_policy, INLINE_ASM_UNSUPPORTED_MSG, INLINE_ASM_UNWIND_UNSUPPORTED_MSG,
     };
     use rustc_ast::InlineAsmOptions;
 

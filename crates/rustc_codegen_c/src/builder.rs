@@ -5,6 +5,7 @@ use std::ops::Deref;
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_ssa::common::{AtomicRmwBinOp, SynchronizationScope};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
     LayoutTypeCodegenMethods,
@@ -17,11 +18,13 @@ use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, HasTypingEnv, LayoutError,
     LayoutOfHelpers, TyAndLayout,
 };
-use rustc_middle::ty::{Ty, TyCtxt};
+use rustc_middle::ty::{AtomicOrdering, Ty, TyCtxt};
 use rustc_target::callconv::{FnAbi, PassMode};
 use rustc_target::spec::{HasTargetSpec, Target};
 
+use crate::config::CStandard;
 use crate::context::{CBasicBlock, CodegenCx, PendingAlloca};
+use crate::include_plan::IncludeCapability;
 
 mod abi;
 mod asm;
@@ -38,6 +41,64 @@ pub struct Builder<'a, 'tcx, 'mx> {
     pub cx: &'a CodegenCx<'tcx, 'mx>,
     bb: CBasicBlock<'mx>,
     value_tys: FxHashMap<CValue<'mx>, CTy<'mx>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtomicBackendMode {
+    C11,
+    Builtin,
+}
+
+const ATOMIC_CMPXCHG_INVALID_ORDER_MSG: &str =
+    "invalid atomic cmpxchg ordering: failure ordering must be no stronger than success and must not be Release/AcqRel";
+
+fn select_atomic_mode(c_std: CStandard) -> AtomicBackendMode {
+    match c_std {
+        CStandard::C99 | CStandard::Gnu99 => AtomicBackendMode::Builtin,
+        CStandard::C11
+        | CStandard::C17
+        | CStandard::C23
+        | CStandard::Gnu11
+        | CStandard::Gnu17
+        | CStandard::Gnu23 => AtomicBackendMode::C11,
+    }
+}
+
+fn map_order_c11(order: AtomicOrdering) -> &'static str {
+    match order {
+        AtomicOrdering::Relaxed => "memory_order_relaxed",
+        AtomicOrdering::Release => "memory_order_release",
+        AtomicOrdering::Acquire => "memory_order_acquire",
+        AtomicOrdering::AcqRel => "memory_order_acq_rel",
+        AtomicOrdering::SeqCst => "memory_order_seq_cst",
+    }
+}
+
+fn map_order_builtin(order: AtomicOrdering) -> &'static str {
+    match order {
+        AtomicOrdering::Relaxed => "__ATOMIC_RELAXED",
+        AtomicOrdering::Release => "__ATOMIC_RELEASE",
+        AtomicOrdering::Acquire => "__ATOMIC_ACQUIRE",
+        AtomicOrdering::AcqRel => "__ATOMIC_ACQ_REL",
+        AtomicOrdering::SeqCst => "__ATOMIC_SEQ_CST",
+    }
+}
+
+fn validate_cmpxchg_order(
+    success: AtomicOrdering,
+    failure: AtomicOrdering,
+) -> Result<(), &'static str> {
+    let _ = success;
+    let valid = matches!(
+        failure,
+        AtomicOrdering::Relaxed | AtomicOrdering::Acquire | AtomicOrdering::SeqCst
+    );
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ATOMIC_CMPXCHG_INVALID_ORDER_MSG)
+    }
 }
 
 impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
@@ -351,6 +412,160 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Pointer(pointee))))
     }
 
+    fn atomic_mode(&self) -> AtomicBackendMode {
+        select_atomic_mode(self.cx.c_std)
+    }
+
+    fn atomic_fatal(&self, msg: impl Into<String>) -> ! {
+        self.cx.tcx.sess.dcx().fatal(msg.into())
+    }
+
+    fn atomic_pointer_int_ty(&self) -> CTy<'mx> {
+        match self.tcx.data_layout.pointer_size().bytes() {
+            4 => CTy::UInt(CUintTy::U32),
+            8 => CTy::UInt(CUintTy::U64),
+            bytes => self.atomic_fatal(format!(
+                "unsupported pointer width for atomic lowering: {bytes} bytes"
+            )),
+        }
+    }
+
+    fn atomic_storage_ty(&self, mem_ty: CTy<'mx>, intrinsic: &str) -> (CTy<'mx>, bool) {
+        match mem_ty {
+            CTy::Bool | CTy::Int(_) | CTy::UInt(_) => (mem_ty, false),
+            CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_)) => {
+                (self.atomic_pointer_int_ty(), true)
+            }
+            _ => self.atomic_fatal(format!(
+                "{intrinsic} supports only integer/bool/pointer atomics, got {mem_ty:?}"
+            )),
+        }
+    }
+
+    fn atomic_validate_size(&self, mem_ty: CTy<'mx>, size: rustc_abi::Size, intrinsic: &str) {
+        let Some(expected) = self.c_ty_size_bytes(mem_ty) else {
+            self.atomic_fatal(format!(
+                "{intrinsic} could not determine C size for atomic type {mem_ty:?}"
+            ));
+        };
+        let actual = size.bytes() as usize;
+        if expected != actual {
+            self.atomic_fatal(format!(
+                "{intrinsic} size mismatch: type size is {expected} bytes but intrinsic requested {actual} bytes"
+            ));
+        }
+    }
+
+    fn atomic_infer_mem_ty(
+        &self,
+        ptr: CValue<'mx>,
+        fallback: Option<CTy<'mx>>,
+        intrinsic: &str,
+    ) -> CTy<'mx> {
+        let ptr_ty = self.pointer_pointee_ty(ptr);
+        match (ptr_ty, fallback) {
+            (Some(ptr_ty), Some(fallback_ty)) => {
+                let ptr_is_byte = matches!(ptr_ty, CTy::UInt(CUintTy::U8) | CTy::Int(CIntTy::I8));
+                let fallback_is_pointer = matches!(
+                    fallback_ty,
+                    CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_))
+                );
+                let fallback_wider = self.c_ty_size_bytes(fallback_ty).unwrap_or(0)
+                    > self.c_ty_size_bytes(ptr_ty).unwrap_or(0);
+                if fallback_is_pointer || (ptr_is_byte && fallback_wider) {
+                    fallback_ty
+                } else {
+                    ptr_ty
+                }
+            }
+            (Some(ptr_ty), None) => ptr_ty,
+            (None, Some(fallback_ty)) => fallback_ty,
+            (None, None) => self.atomic_fatal(format!(
+                "{intrinsic} could not infer atomic pointee type for pointer value {ptr:?}"
+            )),
+        }
+    }
+
+    fn atomic_c11_ptr_macro(&self, op_ty: CTy<'mx>, is_const: bool) -> &'static str {
+        match (op_ty, is_const) {
+            (CTy::Bool, false) => "__rust_atomic_bool_ptr",
+            (CTy::Bool, true) => "__rust_atomic_bool_const_ptr",
+            (CTy::Int(CIntTy::I8), false) => "__rust_atomic_i8_ptr",
+            (CTy::Int(CIntTy::I8), true) => "__rust_atomic_i8_const_ptr",
+            (CTy::Int(CIntTy::I16), false) => "__rust_atomic_i16_ptr",
+            (CTy::Int(CIntTy::I16), true) => "__rust_atomic_i16_const_ptr",
+            (CTy::Int(CIntTy::I32), false) => "__rust_atomic_i32_ptr",
+            (CTy::Int(CIntTy::I32), true) => "__rust_atomic_i32_const_ptr",
+            (CTy::Int(CIntTy::I64), false) => "__rust_atomic_i64_ptr",
+            (CTy::Int(CIntTy::I64), true) => "__rust_atomic_i64_const_ptr",
+            (CTy::Int(CIntTy::Isize), false) => "__rust_atomic_size_ptr",
+            (CTy::Int(CIntTy::Isize), true) => "__rust_atomic_size_const_ptr",
+            (CTy::UInt(CUintTy::U8), false) => "__rust_atomic_u8_ptr",
+            (CTy::UInt(CUintTy::U8), true) => "__rust_atomic_u8_const_ptr",
+            (CTy::UInt(CUintTy::U16), false) => "__rust_atomic_u16_ptr",
+            (CTy::UInt(CUintTy::U16), true) => "__rust_atomic_u16_const_ptr",
+            (CTy::UInt(CUintTy::U32), false) => "__rust_atomic_u32_ptr",
+            (CTy::UInt(CUintTy::U32), true) => "__rust_atomic_u32_const_ptr",
+            (CTy::UInt(CUintTy::U64), false) => "__rust_atomic_u64_ptr",
+            (CTy::UInt(CUintTy::U64), true) => "__rust_atomic_u64_const_ptr",
+            (CTy::UInt(CUintTy::Usize), false) => "__rust_atomic_size_ptr",
+            (CTy::UInt(CUintTy::Usize), true) => "__rust_atomic_size_const_ptr",
+            _ => self.atomic_fatal(format!(
+                "C11 atomic lowering has no pointer cast macro for type {op_ty:?}"
+            )),
+        }
+    }
+
+    fn atomic_addr_expr(
+        &self,
+        ptr: CValue<'mx>,
+        op_ty: CTy<'mx>,
+        mode: AtomicBackendMode,
+        is_const: bool,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        match mode {
+            AtomicBackendMode::C11 => {
+                let macro_name = self.atomic_c11_ptr_macro(op_ty, is_const);
+                self.mcx.call(self.mcx.value(CValue::Func(macro_name)), vec![self.mcx.value(ptr)])
+            }
+            AtomicBackendMode::Builtin => {
+                self.mcx.cast(self.pointer_to(op_ty), self.mcx.value(ptr))
+            }
+        }
+    }
+
+    fn atomic_order_expr(
+        &self,
+        order: AtomicOrdering,
+        mode: AtomicBackendMode,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        let name = match mode {
+            AtomicBackendMode::C11 => map_order_c11(order),
+            AtomicBackendMode::Builtin => map_order_builtin(order),
+        };
+        self.mcx.value(CValue::Func(name))
+    }
+
+    fn atomic_value_expr(
+        &self,
+        value: CValue<'mx>,
+        target_ty: CTy<'mx>,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        match self.value_ty(value) {
+            Some(value_ty) if value_ty != target_ty => {
+                self.mcx.cast(target_ty, self.mcx.value(value))
+            }
+            Some(_) => self.mcx.value(value),
+            None => self.mcx.cast(target_ty, self.mcx.value(value)),
+        }
+    }
+
+    fn ensure_c11_atomic_include(&self, mode: AtomicBackendMode) {
+        if mode == AtomicBackendMode::C11 {
+            self.cx.require_include_capability(IncludeCapability::AtomicApi);
+        }
+    }
+
     fn call_signature_from_ty(&self, llty: CTy<'mx>) -> (CTy<'mx>, CTy<'mx>) {
         match llty {
             CTy::Ref(kind) => match kind.0 {
@@ -419,10 +634,10 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         if slot.declared || slot.prefer_bytes {
             return;
         }
-        self.cx.pending_allocas.borrow_mut().insert(
-            (fkey, ptr),
-            PendingAlloca { prefer_bytes: true, ..slot },
-        );
+        self.cx
+            .pending_allocas
+            .borrow_mut()
+            .insert((fkey, ptr), PendingAlloca { prefer_bytes: true, ..slot });
     }
 
     fn ensure_alloca_decl(&mut self, ptr: CValue<'mx>, suggested_ty: Option<CTy<'mx>>) {
@@ -438,18 +653,20 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             self.alloca_byte_array_ty(slot.bytes)
         } else {
             match suggested_ty {
-            Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _)) => CTy::Ref(kind),
+                Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Array(_, _)) => CTy::Ref(kind),
                 // Keep stack slots conservative for struct-like projections: represent storage as
                 // bytes and rely on typed casts at use sites.
                 Some(CTy::Ref(kind)) if matches!(kind.0, CTyKind::Struct(_)) => {
                     self.alloca_byte_array_ty(slot.bytes)
                 }
-            Some(other) => self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
-                // When the suggested element type doesn't tile the stack slot, fall back to a
-                // byte array and rely on typed loads/stores through explicit casts.
-                self.alloca_byte_array_ty(slot.bytes)
-            }),
-            None => panic!("cannot infer alloca declaration type for {ptr:?}"),
+                Some(other) => {
+                    self.array_decl_ty_from_bytes(slot.bytes, other).unwrap_or_else(|| {
+                        // When the suggested element type doesn't tile the stack slot, fall back to a
+                        // byte array and rely on typed loads/stores through explicit casts.
+                        self.alloca_byte_array_ty(slot.bytes)
+                    })
+                }
+                None => panic!("cannot infer alloca declaration type for {ptr:?}"),
             }
         };
 
@@ -1146,7 +1363,31 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         order: rustc_middle::ty::AtomicOrdering,
         size: rustc_abi::Size,
     ) -> Self::Value {
-        todo!()
+        let (op_ty, is_ptr) = self.atomic_storage_ty(ty, "atomic_load");
+        self.atomic_validate_size(ty, size, "atomic_load");
+        let mode = self.atomic_mode();
+        self.ensure_c11_atomic_include(mode);
+
+        let addr = self.atomic_addr_expr(ptr, op_ty, mode, true);
+        let order = self.atomic_order_expr(order, mode);
+        let callee = match mode {
+            AtomicBackendMode::C11 => self.mcx.value(CValue::Func("atomic_load_explicit")),
+            AtomicBackendMode::Builtin => self.mcx.raw("__atomic_load_n"),
+        };
+        let loaded = self.bb.func.0.next_local_var();
+        let call = self.mcx.call(callee, vec![addr, order]);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(loaded, op_ty, Some(call))));
+        self.record_value_ty(loaded, op_ty);
+
+        if !is_ptr && op_ty == ty {
+            return loaded;
+        }
+
+        let ret = self.bb.func.0.next_local_var();
+        let cast = self.mcx.cast(ty, self.mcx.value(loaded));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(cast))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn load_operand(
@@ -1235,7 +1476,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             let cast_ptr = self.mcx.cast(self.pointer_to(store_ty), self.mcx.value(ptr));
             self.mcx.unary("*", cast_ptr)
         };
-        let store_is_pointer = matches!(store_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_)));
+        let store_is_pointer =
+            matches!(store_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_)));
         let scalar_literal = matches!(val, CValue::Scalar(_) | CValue::ScalarTyped(_, _));
         let rhs = match val_ty {
             Some(val_ty) if val_ty == store_ty && store_is_pointer && scalar_literal => {
@@ -1246,7 +1488,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 self.mcx.index(self.mcx.value(val), self.mcx.value(CValue::Scalar(0)))
             }
             Some(_) => self.mcx.cast(store_ty, self.mcx.value(val)),
-            None if store_is_pointer && scalar_literal => self.mcx.cast(store_ty, self.mcx.value(val)),
+            None if store_is_pointer && scalar_literal => {
+                self.mcx.cast(store_ty, self.mcx.value(val))
+            }
             None => self.mcx.value(val),
         };
         let assign = self.mcx.binary(lhs, rhs, "=");
@@ -1271,7 +1515,23 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         order: rustc_middle::ty::AtomicOrdering,
         size: rustc_abi::Size,
     ) {
-        todo!()
+        let mem_ty = self
+            .value_ty(val)
+            .unwrap_or_else(|| self.atomic_infer_mem_ty(ptr, None, "atomic_store"));
+        let (op_ty, _) = self.atomic_storage_ty(mem_ty, "atomic_store");
+        self.atomic_validate_size(mem_ty, size, "atomic_store");
+        let mode = self.atomic_mode();
+        self.ensure_c11_atomic_include(mode);
+
+        let addr = self.atomic_addr_expr(ptr, op_ty, mode, false);
+        let value = self.atomic_value_expr(val, op_ty);
+        let order = self.atomic_order_expr(order, mode);
+        let callee = match mode {
+            AtomicBackendMode::C11 => self.mcx.value(CValue::Func("atomic_store_explicit")),
+            AtomicBackendMode::Builtin => self.mcx.raw("__atomic_store_n"),
+        };
+        let call = self.mcx.call(callee, vec![addr, value, order]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
     }
 
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
@@ -1328,7 +1588,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
             // The first index on a pointer-to-struct is element stepping (array semantics),
             // not a field projection. Keep the pointee type as the same struct.
-            if i == 0 && matches!(projected_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)))
+            if i == 0
+                && matches!(projected_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)))
             {
                 let idx_expr = if let Some(index) = const_index {
                     self.mcx.value(CValue::Scalar(index as i128))
@@ -1884,7 +2145,71 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         failure_order: rustc_middle::ty::AtomicOrdering,
         weak: bool,
     ) -> (Self::Value, Self::Value) {
-        todo!()
+        if let Err(msg) = validate_cmpxchg_order(order, failure_order) {
+            self.atomic_fatal(msg);
+        }
+
+        let mem_ty = self.atomic_infer_mem_ty(
+            dst,
+            self.value_ty(cmp).or(self.value_ty(src)),
+            "atomic_cmpxchg",
+        );
+        let (op_ty, is_ptr) = self.atomic_storage_ty(mem_ty, "atomic_cmpxchg");
+        let mode = self.atomic_mode();
+        self.ensure_c11_atomic_include(mode);
+
+        let addr = self.atomic_addr_expr(dst, op_ty, mode, false);
+        let expected = self.bb.func.0.next_local_var();
+        let expected_init = self.atomic_value_expr(cmp, op_ty);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            expected,
+            op_ty,
+            Some(expected_init),
+        )));
+        self.record_value_ty(expected, op_ty);
+
+        let expected_ptr =
+            self.mcx.cast(self.pointer_to(op_ty), self.mcx.unary("&", self.mcx.value(expected)));
+        let desired = self.atomic_value_expr(src, op_ty);
+        let success_order = self.atomic_order_expr(order, mode);
+        let fail_order = self.atomic_order_expr(failure_order, mode);
+        let success = self.bb.func.0.next_local_var();
+        let call = match mode {
+            AtomicBackendMode::C11 => {
+                let callee = if weak {
+                    self.mcx.value(CValue::Func("atomic_compare_exchange_weak_explicit"))
+                } else {
+                    self.mcx.value(CValue::Func("atomic_compare_exchange_strong_explicit"))
+                };
+                self.mcx.call(callee, vec![addr, expected_ptr, desired, success_order, fail_order])
+            }
+            AtomicBackendMode::Builtin => self.mcx.call(
+                self.mcx.raw("__atomic_compare_exchange_n"),
+                vec![
+                    addr,
+                    expected_ptr,
+                    desired,
+                    self.mcx.value(self.const_bool(weak)),
+                    success_order,
+                    fail_order,
+                ],
+            ),
+        };
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(success, CTy::Bool, Some(call))));
+        self.record_value_ty(success, CTy::Bool);
+
+        let old = self.bb.func.0.next_local_var();
+        let old_init = if is_ptr {
+            self.mcx.cast(mem_ty, self.mcx.value(expected))
+        } else if mem_ty == op_ty {
+            self.mcx.value(expected)
+        } else {
+            self.mcx.cast(mem_ty, self.mcx.value(expected))
+        };
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(old, mem_ty, Some(old_init))));
+        self.record_value_ty(old, mem_ty);
+
+        (old, success)
     }
 
     fn atomic_rmw(
@@ -1895,7 +2220,118 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         order: rustc_middle::ty::AtomicOrdering,
         ret_ptr: bool,
     ) -> Self::Value {
-        todo!()
+        let mem_ty = self.atomic_infer_mem_ty(dst, self.value_ty(src), "atomic_rmw");
+        let (op_ty, is_ptr) = self.atomic_storage_ty(mem_ty, "atomic_rmw");
+        let mode = self.atomic_mode();
+
+        let use_c11 = mode == AtomicBackendMode::C11
+            && !is_ptr
+            && matches!(
+                op,
+                AtomicRmwBinOp::AtomicXchg
+                    | AtomicRmwBinOp::AtomicAdd
+                    | AtomicRmwBinOp::AtomicSub
+                    | AtomicRmwBinOp::AtomicAnd
+                    | AtomicRmwBinOp::AtomicOr
+                    | AtomicRmwBinOp::AtomicXor
+            );
+        let op_mode = if use_c11 { AtomicBackendMode::C11 } else { AtomicBackendMode::Builtin };
+        self.ensure_c11_atomic_include(op_mode);
+
+        if is_ptr
+            && matches!(
+                op,
+                AtomicRmwBinOp::AtomicMax
+                    | AtomicRmwBinOp::AtomicMin
+                    | AtomicRmwBinOp::AtomicUMax
+                    | AtomicRmwBinOp::AtomicUMin
+            )
+        {
+            self.atomic_fatal(
+                "atomic_rmw max/min operations are not supported for pointer atomics",
+            );
+        }
+
+        let addr = self.atomic_addr_expr(dst, op_ty, op_mode, false);
+        let rhs = self.atomic_value_expr(src, op_ty);
+        let order = self.atomic_order_expr(order, op_mode);
+        let old_storage = self.bb.func.0.next_local_var();
+        let call = match (op_mode, op) {
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicXchg) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_exchange_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicAdd) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_fetch_add_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicSub) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_fetch_sub_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicAnd) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_fetch_and_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicOr) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_fetch_or_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::C11, AtomicRmwBinOp::AtomicXor) => self.mcx.call(
+                self.mcx.value(CValue::Func("atomic_fetch_xor_explicit")),
+                vec![addr, rhs, order],
+            ),
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicXchg) => {
+                self.mcx.call(self.mcx.raw("__atomic_exchange_n"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicAdd) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_add"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicSub) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_sub"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicAnd) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_and"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicNand) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_nand"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicOr) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_or"), vec![addr, rhs, order])
+            }
+            (AtomicBackendMode::Builtin, AtomicRmwBinOp::AtomicXor) => {
+                self.mcx.call(self.mcx.raw("__atomic_fetch_xor"), vec![addr, rhs, order])
+            }
+            (
+                AtomicBackendMode::Builtin,
+                AtomicRmwBinOp::AtomicMax | AtomicRmwBinOp::AtomicUMax,
+            ) => self.mcx.call(self.mcx.raw("__atomic_fetch_max"), vec![addr, rhs, order]),
+            (
+                AtomicBackendMode::Builtin,
+                AtomicRmwBinOp::AtomicMin | AtomicRmwBinOp::AtomicUMin,
+            ) => self.mcx.call(self.mcx.raw("__atomic_fetch_min"), vec![addr, rhs, order]),
+            _ => self.atomic_fatal("unsupported C11 atomic_rmw operation"),
+        };
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(old_storage, op_ty, Some(call))));
+        self.record_value_ty(old_storage, op_ty);
+
+        if is_ptr && ret_ptr {
+            let ret = self.bb.func.0.next_local_var();
+            let cast = self.mcx.cast(mem_ty, self.mcx.value(old_storage));
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, mem_ty, Some(cast))));
+            self.record_value_ty(ret, mem_ty);
+            return ret;
+        }
+
+        if !is_ptr && mem_ty != op_ty {
+            let ret = self.bb.func.0.next_local_var();
+            let cast = self.mcx.cast(mem_ty, self.mcx.value(old_storage));
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, mem_ty, Some(cast))));
+            self.record_value_ty(ret, mem_ty);
+            return ret;
+        }
+
+        old_storage
     }
 
     fn atomic_fence(
@@ -1903,7 +2339,25 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         order: rustc_middle::ty::AtomicOrdering,
         scope: rustc_codegen_ssa::common::SynchronizationScope,
     ) {
-        todo!()
+        let mode = self.atomic_mode();
+        self.ensure_c11_atomic_include(mode);
+        let order = self.atomic_order_expr(order, mode);
+        let callee = match (mode, scope) {
+            (AtomicBackendMode::C11, SynchronizationScope::SingleThread) => {
+                self.mcx.value(CValue::Func("atomic_signal_fence"))
+            }
+            (AtomicBackendMode::C11, SynchronizationScope::CrossThread) => {
+                self.mcx.value(CValue::Func("atomic_thread_fence"))
+            }
+            (AtomicBackendMode::Builtin, SynchronizationScope::SingleThread) => {
+                self.mcx.raw("__atomic_signal_fence")
+            }
+            (AtomicBackendMode::Builtin, SynchronizationScope::CrossThread) => {
+                self.mcx.raw("__atomic_thread_fence")
+            }
+        };
+        let call = self.mcx.call(callee, vec![order]);
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
     }
 
     fn set_invariant_load(&mut self, load: Self::Value) {
@@ -2078,5 +2532,55 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         // C backend does not model callsite attributes; cleanup-callsite attrs are
         // optimization hints and can be ignored.
         let _ = llret;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        map_order_builtin, map_order_c11, select_atomic_mode, validate_cmpxchg_order,
+        AtomicBackendMode, ATOMIC_CMPXCHG_INVALID_ORDER_MSG,
+    };
+    use crate::config::CStandard;
+    use rustc_middle::ty::AtomicOrdering;
+
+    #[test]
+    fn select_atomic_mode_prefers_builtin_for_c99_variants() {
+        assert_eq!(select_atomic_mode(CStandard::C99), AtomicBackendMode::Builtin);
+        assert_eq!(select_atomic_mode(CStandard::Gnu99), AtomicBackendMode::Builtin);
+    }
+
+    #[test]
+    fn select_atomic_mode_prefers_c11_for_c11_and_newer() {
+        assert_eq!(select_atomic_mode(CStandard::C11), AtomicBackendMode::C11);
+        assert_eq!(select_atomic_mode(CStandard::Gnu11), AtomicBackendMode::C11);
+        assert_eq!(select_atomic_mode(CStandard::C23), AtomicBackendMode::C11);
+        assert_eq!(select_atomic_mode(CStandard::Gnu23), AtomicBackendMode::C11);
+    }
+
+    #[test]
+    fn validate_cmpxchg_order_accepts_acquire_relaxed() {
+        assert!(validate_cmpxchg_order(AtomicOrdering::Acquire, AtomicOrdering::Relaxed).is_ok());
+    }
+
+    #[test]
+    fn validate_cmpxchg_order_rejects_failure_release() {
+        assert_eq!(
+            validate_cmpxchg_order(AtomicOrdering::SeqCst, AtomicOrdering::Release).unwrap_err(),
+            ATOMIC_CMPXCHG_INVALID_ORDER_MSG
+        );
+    }
+
+    #[test]
+    fn validate_cmpxchg_order_accepts_release_acquire_pair() {
+        assert!(validate_cmpxchg_order(AtomicOrdering::Release, AtomicOrdering::Acquire).is_ok());
+    }
+
+    #[test]
+    fn ordering_mapping_matches_expected_symbols() {
+        assert_eq!(map_order_c11(AtomicOrdering::Relaxed), "memory_order_relaxed");
+        assert_eq!(map_order_c11(AtomicOrdering::SeqCst), "memory_order_seq_cst");
+        assert_eq!(map_order_builtin(AtomicOrdering::Acquire), "__ATOMIC_ACQUIRE");
+        assert_eq!(map_order_builtin(AtomicOrdering::AcqRel), "__ATOMIC_ACQ_REL");
     }
 }

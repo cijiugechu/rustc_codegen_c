@@ -10,6 +10,7 @@ pub(crate) enum IncludeCapability {
     StdIntTypes,
     SizeTypes,
     AbortApi,
+    AtomicApi,
 }
 
 pub(crate) struct IncludePlanner {
@@ -66,6 +67,7 @@ fn capability_header(capability: IncludeCapability) -> &'static str {
         IncludeCapability::StdIntTypes => "stdint.h",
         IncludeCapability::SizeTypes => "stddef.h",
         IncludeCapability::AbortApi => "stdlib.h",
+        IncludeCapability::AtomicApi => "stdatomic.h",
     }
 }
 
@@ -74,6 +76,7 @@ fn minimum_required_level(capability: IncludeCapability) -> u16 {
         IncludeCapability::StdIntTypes
         | IncludeCapability::SizeTypes
         | IncludeCapability::AbortApi => 1999,
+        IncludeCapability::AtomicApi => 2011,
     }
 }
 
@@ -106,5 +109,20 @@ mod tests {
         let mut planner = IncludePlanner::new(CStandard::C99);
         planner.require(IncludeCapability::AbortApi);
         assert!(planner.build_set().is_ok());
+    }
+
+    #[test]
+    fn build_set_rejects_atomic_capability_on_c99() {
+        let mut planner = IncludePlanner::new(CStandard::C99);
+        planner.require(IncludeCapability::AtomicApi);
+        assert!(planner.build_set().is_err());
+    }
+
+    #[test]
+    fn build_set_accepts_atomic_capability_on_c11() {
+        let mut planner = IncludePlanner::new(CStandard::C11);
+        planner.require(IncludeCapability::AtomicApi);
+        let set = planner.build_set().unwrap();
+        assert!(set.iter().any(|include| include.canonical_name == "stdatomic.h"));
     }
 }

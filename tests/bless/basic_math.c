@@ -28,6 +28,28 @@ static inline _Noreturn void __rust_panic_bounds_check(size_t index, size_t len)
     abort();
 }
 
+/* Helpers for building `_Atomic(T) *` casts from generated code. */
+#define __rust_atomic_bool_ptr(p) ((_Atomic(_Bool) *)(p))
+#define __rust_atomic_bool_const_ptr(p) ((_Atomic(_Bool) const *)(p))
+#define __rust_atomic_i8_ptr(p) ((_Atomic(int8_t) *)(p))
+#define __rust_atomic_i8_const_ptr(p) ((_Atomic(int8_t) const *)(p))
+#define __rust_atomic_i16_ptr(p) ((_Atomic(int16_t) *)(p))
+#define __rust_atomic_i16_const_ptr(p) ((_Atomic(int16_t) const *)(p))
+#define __rust_atomic_i32_ptr(p) ((_Atomic(int32_t) *)(p))
+#define __rust_atomic_i32_const_ptr(p) ((_Atomic(int32_t) const *)(p))
+#define __rust_atomic_i64_ptr(p) ((_Atomic(int64_t) *)(p))
+#define __rust_atomic_i64_const_ptr(p) ((_Atomic(int64_t) const *)(p))
+#define __rust_atomic_u8_ptr(p) ((_Atomic(uint8_t) *)(p))
+#define __rust_atomic_u8_const_ptr(p) ((_Atomic(uint8_t) const *)(p))
+#define __rust_atomic_u16_ptr(p) ((_Atomic(uint16_t) *)(p))
+#define __rust_atomic_u16_const_ptr(p) ((_Atomic(uint16_t) const *)(p))
+#define __rust_atomic_u32_ptr(p) ((_Atomic(uint32_t) *)(p))
+#define __rust_atomic_u32_const_ptr(p) ((_Atomic(uint32_t) const *)(p))
+#define __rust_atomic_u64_ptr(p) ((_Atomic(uint64_t) *)(p))
+#define __rust_atomic_u64_const_ptr(p) ((_Atomic(uint64_t) const *)(p))
+#define __rust_atomic_size_ptr(p) ((_Atomic(size_t) *)(p))
+#define __rust_atomic_size_const_ptr(p) ((_Atomic(size_t) const *)(p))
+
 int64_t foo(uint8_t _0, uint16_t _1, uint32_t _2);
 int32_t main();
 

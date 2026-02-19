@@ -96,10 +96,11 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
         let cmp = self.mcx.call(self.mcx.raw("__builtin_memcmp"), vec![lhs_ptr, rhs_ptr, size]);
         let cmp = self.mcx.cast(CTy::Int(CIntTy::I32), cmp);
         let cmp_val = self.bb.func.0.next_local_var();
-        self.bb
-            .func
-            .0
-            .push_stmt(self.mcx.decl_stmt(self.mcx.var(cmp_val, CTy::Int(CIntTy::I32), Some(cmp))));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            cmp_val,
+            CTy::Int(CIntTy::I32),
+            Some(cmp),
+        )));
         self.record_value_ty(cmp_val, CTy::Int(CIntTy::I32));
         self.icmp(IntPredicate::IntEQ, cmp_val, self.const_i32(0))
     }
@@ -267,10 +268,7 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 let pointee_ty = fn_args.type_at(0);
                 let layout = self.layout_of(pointee_ty);
                 if !layout.is_sized() {
-                    self.tcx
-                        .sess
-                        .dcx()
-                        .span_fatal(span, "raw_eq requires a sized pointee type");
+                    self.tcx.sess.dcx().span_fatal(span, "raw_eq requires a sized pointee type");
                 }
 
                 let lhs_ptr = args[0].immediate();
@@ -282,7 +280,12 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 } else {
                     let pointer_size = self.tcx.data_layout.pointer_size().bytes();
                     if self.raw_eq_use_fast_path(layout, pointer_size) {
-                        self.raw_eq_fast_compare_chunks(lhs_ptr, rhs_ptr, size_bytes, layout.align.abi)
+                        self.raw_eq_fast_compare_chunks(
+                            lhs_ptr,
+                            rhs_ptr,
+                            size_bytes,
+                            layout.align.abi,
+                        )
                     } else {
                         self.raw_eq_memcmp(lhs_ptr, rhs_ptr, size_bytes)
                     }
