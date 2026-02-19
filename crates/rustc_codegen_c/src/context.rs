@@ -13,9 +13,10 @@ use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_c_ast::ModuleCtx;
 use rustc_codegen_ssa::traits::{BackendTypes, LayoutTypeCodegenMethods};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::ty::layout::{
     FnAbiError, FnAbiOfHelpers, FnAbiRequest, HasTyCtxt, LayoutError, LayoutOf, LayoutOfHelpers,
     TyAndLayout,
@@ -68,6 +69,31 @@ pub struct AdtLayoutInfo<'mx> {
     pub fields: Vec<AdtFieldLayout<'mx>>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StaticSymbolInfo<'mx> {
+    pub decl_name: &'mx str,
+    pub link_name: Option<&'mx str>,
+    pub linkage: CLinkage,
+    pub visibility: CVisibility,
+    pub thread_local: bool,
+    pub is_local_definition_candidate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StaticExternDeclAction {
+    EmitExtern,
+    Skip,
+    ConflictLocalAlreadyDeclared,
+}
+
+const STATIC_SYMBOL_CONFLICT_MSG: &str = "inconsistent static symbol materialization state";
+const STATIC_SYMBOL_DEFINED_TWICE_MSG: &str = "static symbol defined more than once in one CGU";
+const STATIC_SYMBOL_EXTERN_DEFINED_MSG: &str =
+    "static symbol was emitted as extern declaration and then as definition in one CGU";
+const STATIC_SYMBOL_EXTERNAL_DEFINITION_MSG: &str =
+    "extern-only static symbol unexpectedly reached local definition path";
+const INCOMPLETE_ARRAY_DECL_ONLY_MSG: &str = "incomplete array is declaration-only";
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum AbiTupleFieldKey<'mx> {
     Void,
@@ -78,6 +104,7 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     Float(CFloatTy),
     Pointer(Box<AbiTupleFieldKey<'mx>>),
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
+    IncompleteArray(Box<AbiTupleFieldKey<'mx>>),
     Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
     Struct(&'mx str),
     Union(&'mx str),
@@ -148,10 +175,12 @@ pub struct CodegenCx<'tcx, 'mx> {
     pub vtables: RefCell<FxHashMap<(Ty<'tcx>, Option<ExistentialTraitRef<'tcx>>), CValue<'mx>>>,
     /// Cached exception personality function symbol.
     pub eh_personality_fn: RefCell<Option<CFunc<'mx>>>,
-    /// Mapping from Rust static definitions to their generated C symbols.
-    pub static_symbols: RefCell<FxHashMap<DefId, &'mx str>>,
-    /// Mapping from Rust static definitions to their C symbol linkage and visibility.
-    pub static_symbol_attrs: RefCell<FxHashMap<DefId, (CLinkage, CVisibility)>>,
+    /// Mapping from Rust static definitions to their generated C symbol metadata.
+    pub static_symbol_infos: RefCell<FxHashMap<DefId, StaticSymbolInfo<'mx>>>,
+    /// Set of statics that already emitted an extern declaration in this module.
+    pub declared_statics: RefCell<FxHashSet<DefId>>,
+    /// Set of statics that already emitted a local definition in this module.
+    pub defined_statics: RefCell<FxHashSet<DefId>>,
     /// Monotonic counter for assigning unique identities to typed scalar constants.
     pub scalar_ids: Cell<u64>,
     /// Per-function value type cache shared across basic blocks.
@@ -206,8 +235,9 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             function_instances: RefCell::new(FxHashMap::default()),
             vtables: RefCell::new(FxHashMap::default()),
             eh_personality_fn: RefCell::new(None),
-            static_symbols: RefCell::new(FxHashMap::default()),
-            static_symbol_attrs: RefCell::new(FxHashMap::default()),
+            static_symbol_infos: RefCell::new(FxHashMap::default()),
+            declared_statics: RefCell::new(FxHashSet::default()),
+            defined_statics: RefCell::new(FxHashSet::default()),
             scalar_ids: Cell::new(0),
             value_tys: RefCell::new(FxHashMap::default()),
             current_fkey: Cell::new(None),
@@ -243,41 +273,128 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         id
     }
 
-    pub(crate) fn register_static_symbol(&self, def_id: DefId, symbol_name: &str) -> &'mx str {
-        if let Some(symbol) = self.static_symbols.borrow().get(&def_id).copied() {
-            return symbol;
+    fn default_static_symbol_info(&self, def_id: DefId) -> StaticSymbolInfo<'mx> {
+        let instance = Instance::mono(self.tcx, def_id);
+        let symbol_name = self.tcx.symbol_name(instance).name;
+        let (decl_name, link_name) = self.declaration_symbol_names(symbol_name);
+        let thread_local =
+            self.tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::THREAD_LOCAL);
+        StaticSymbolInfo {
+            decl_name: self.mcx.alloc_str(&decl_name),
+            link_name: link_name.as_ref().map(|name| self.mcx.alloc_str(name)),
+            linkage: CLinkage::External,
+            visibility: CVisibility::Default,
+            thread_local,
+            is_local_definition_candidate: false,
+        }
+    }
+
+    pub(crate) fn register_static_symbol_info(
+        &self,
+        def_id: DefId,
+        symbol_name: &str,
+        linkage: CLinkage,
+        visibility: CVisibility,
+        is_local_definition_candidate: bool,
+    ) -> StaticSymbolInfo<'mx> {
+        let (decl_name, link_name) = self.declaration_symbol_names(symbol_name);
+        let decl_name = self.mcx.alloc_str(&decl_name);
+        let link_name = link_name.as_ref().map(|name| self.mcx.alloc_str(name));
+        let thread_local =
+            self.tcx.codegen_fn_attrs(def_id).flags.contains(CodegenFnAttrFlags::THREAD_LOCAL);
+
+        let mut infos = self.static_symbol_infos.borrow_mut();
+        if let Some(info) = infos.get_mut(&def_id) {
+            if info.decl_name != decl_name || info.link_name != link_name {
+                self.tcx.sess.dcx().fatal(format!(
+                    "{STATIC_SYMBOL_CONFLICT_MSG}: static {def_id:?} maps to both `{}` and `{}`",
+                    info.decl_name, decl_name
+                ));
+            }
+            info.linkage = linkage;
+            info.visibility = visibility;
+            info.thread_local |= thread_local;
+            info.is_local_definition_candidate |= is_local_definition_candidate;
+            return *info;
         }
 
-        let symbol_name = sanitize_symbol_name(symbol_name);
-        let symbol_name = self.mcx.alloc_str(&symbol_name);
-        self.static_symbols.borrow_mut().insert(def_id, symbol_name);
-        symbol_name
+        let info = StaticSymbolInfo {
+            decl_name,
+            link_name,
+            linkage,
+            visibility,
+            thread_local,
+            is_local_definition_candidate,
+        };
+        infos.insert(def_id, info);
+        info
+    }
+
+    pub(crate) fn ensure_static_info(&self, def_id: DefId) -> StaticSymbolInfo<'mx> {
+        if let Some(info) = self.static_symbol_infos.borrow().get(&def_id).copied() {
+            return info;
+        }
+
+        let info = self.default_static_symbol_info(def_id);
+        self.static_symbol_infos.borrow_mut().insert(def_id, info);
+        info
     }
 
     pub(crate) fn static_symbol(&self, def_id: DefId) -> &'mx str {
-        if let Some(symbol) = self.static_symbols.borrow().get(&def_id).copied() {
-            return symbol;
+        self.ensure_static_info(def_id).decl_name
+    }
+
+    pub(crate) fn ensure_static_declared(&self, def_id: DefId) {
+        let info = self.ensure_static_info(def_id);
+        let already_declared = self.declared_statics.borrow().contains(&def_id);
+        let already_defined = self.defined_statics.borrow().contains(&def_id);
+        match static_extern_decl_action(
+            info.is_local_definition_candidate,
+            already_declared,
+            already_defined,
+        ) {
+            StaticExternDeclAction::Skip => {}
+            StaticExternDeclAction::ConflictLocalAlreadyDeclared => {
+                self.tcx.sess.dcx().fatal(format!(
+                    "{STATIC_SYMBOL_CONFLICT_MSG}: static `{}` ({def_id:?})",
+                    info.decl_name
+                ));
+            }
+            StaticExternDeclAction::EmitExtern => {
+                self.declared_statics.borrow_mut().insert(def_id);
+                let decl_ty = CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+                    self.mcx.arena().alloc(CTyKind::IncompleteArray(CTy::UInt(CUintTy::U8))),
+                ));
+                self.mcx.module().push_decl(self.mcx.extern_var_with_attrs(
+                    CValue::Func(info.decl_name),
+                    decl_ty,
+                    info.visibility,
+                    info.link_name,
+                    info.thread_local,
+                ));
+            }
         }
-
-        let instance = Instance::mono(self.tcx, def_id);
-        self.register_static_symbol(def_id, self.tcx.symbol_name(instance).name)
     }
 
-    pub(crate) fn register_static_symbol_attrs(
-        &self,
-        def_id: DefId,
-        linkage: CLinkage,
-        visibility: CVisibility,
-    ) {
-        self.static_symbol_attrs.borrow_mut().insert(def_id, (linkage, visibility));
+    pub(crate) fn mark_static_defined(&self, def_id: DefId) {
+        let info = self.ensure_static_info(def_id);
+        let already_declared = self.declared_statics.borrow().contains(&def_id);
+        let already_defined = self.defined_statics.borrow().contains(&def_id);
+        if let Err(msg) = validate_static_definition_transition(
+            info.is_local_definition_candidate,
+            already_declared,
+            already_defined,
+        ) {
+            self.tcx.sess.dcx().fatal(format!("{msg}: static `{}` ({def_id:?})", info.decl_name));
+        }
+        self.defined_statics.borrow_mut().insert(def_id);
     }
 
-    pub(crate) fn static_symbol_attrs(&self, def_id: DefId) -> (CLinkage, CVisibility) {
-        self.static_symbol_attrs
-            .borrow()
-            .get(&def_id)
-            .copied()
-            .unwrap_or((CLinkage::External, CVisibility::Default))
+    pub(crate) fn static_addr_expr(&self, def_id: DefId) -> CValue<'mx> {
+        self.ensure_static_declared(def_id);
+        let symbol = self.static_symbol(def_id);
+        let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));
+        CValue::Func(expr)
     }
 
     /// Returns the C declaration name and optional extern link name for a Rust symbol.
@@ -632,6 +749,9 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 CTyKind::Array(elem, len) => {
                     AbiTupleFieldKey::Array(Box::new(self.abi_tuple_field_key(*elem)), *len)
                 }
+                CTyKind::IncompleteArray(elem) => {
+                    AbiTupleFieldKey::IncompleteArray(Box::new(self.abi_tuple_field_key(*elem)))
+                }
                 CTyKind::Function { ret, params } => AbiTupleFieldKey::Function {
                     ret: Box::new(self.abi_tuple_field_key(*ret)),
                     params: params
@@ -689,6 +809,13 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     let (elem_size, elem_align) = self.c_ty_size_align(*elem)?;
                     Some((elem_size.saturating_mul(*count), elem_align))
                 }
+                CTyKind::IncompleteArray(_) => {
+                    let ty_name = format!("{ty:?}");
+                    let msg = validate_incomplete_array_usage(false).unwrap_err();
+                    self.tcx.sess.dcx().fatal(format!(
+                        "{msg}: encountered in size/alignment query for `{ty_name}`"
+                    ));
+                }
                 CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) | CTyKind::Union(_) => {
                     let info = self.struct_layouts.borrow().get(&ty)?.clone();
@@ -726,6 +853,89 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
             self.mcx.arena().alloc(CTyKind::Pointer(pointee)),
         ))
+    }
+}
+
+pub(crate) fn static_extern_decl_action(
+    is_local_definition_candidate: bool,
+    already_declared: bool,
+    already_defined: bool,
+) -> StaticExternDeclAction {
+    if already_defined {
+        return StaticExternDeclAction::Skip;
+    }
+    if is_local_definition_candidate && already_declared {
+        return StaticExternDeclAction::ConflictLocalAlreadyDeclared;
+    }
+    if is_local_definition_candidate || already_declared {
+        return StaticExternDeclAction::Skip;
+    }
+    StaticExternDeclAction::EmitExtern
+}
+
+pub(crate) fn validate_static_definition_transition(
+    is_local_definition_candidate: bool,
+    already_declared: bool,
+    already_defined: bool,
+) -> Result<(), &'static str> {
+    if already_defined {
+        return Err(STATIC_SYMBOL_DEFINED_TWICE_MSG);
+    }
+    if already_declared {
+        return Err(STATIC_SYMBOL_EXTERN_DEFINED_MSG);
+    }
+    if !is_local_definition_candidate {
+        return Err(STATIC_SYMBOL_EXTERNAL_DEFINITION_MSG);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_incomplete_array_usage(is_extern_declaration: bool) -> Result<(), &'static str> {
+    if is_extern_declaration {
+        Ok(())
+    } else {
+        Err(INCOMPLETE_ARRAY_DECL_ONLY_MSG)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        static_extern_decl_action, validate_incomplete_array_usage,
+        validate_static_definition_transition, StaticExternDeclAction,
+    };
+
+    #[test]
+    fn extern_static_first_reference_emits_declaration_then_dedups() {
+        assert_eq!(static_extern_decl_action(false, false, false), StaticExternDeclAction::EmitExtern);
+        assert_eq!(static_extern_decl_action(false, true, false), StaticExternDeclAction::Skip);
+    }
+
+    #[test]
+    fn local_definition_candidate_does_not_emit_extern() {
+        assert_eq!(static_extern_decl_action(true, false, false), StaticExternDeclAction::Skip);
+    }
+
+    #[test]
+    fn local_definition_conflicts_with_prior_extern() {
+        assert_eq!(
+            static_extern_decl_action(true, true, false),
+            StaticExternDeclAction::ConflictLocalAlreadyDeclared
+        );
+    }
+
+    #[test]
+    fn static_definition_transition_validation() {
+        assert!(validate_static_definition_transition(true, false, false).is_ok());
+        assert!(validate_static_definition_transition(true, true, false).is_err());
+        assert!(validate_static_definition_transition(false, false, false).is_err());
+        assert!(validate_static_definition_transition(true, false, true).is_err());
+    }
+
+    #[test]
+    fn incomplete_array_usage_validation() {
+        assert!(validate_incomplete_array_usage(true).is_ok());
+        assert!(validate_incomplete_array_usage(false).is_err());
     }
 }
 

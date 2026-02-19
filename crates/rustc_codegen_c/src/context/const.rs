@@ -81,11 +81,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         match alloc {
             GlobalAlloc::Memory(alloc) => self.const_data_from_alloc(alloc),
             GlobalAlloc::Function { instance, .. } => CValue::Func(self.get_fn(instance).0.name),
-            GlobalAlloc::Static(def_id) => {
-                let symbol = self.static_symbol(def_id);
-                let expr = self.mcx.alloc_str(&format!("((uint8_t *)&{symbol})"));
-                self.record_u8_ptr_value(CValue::Func(expr))
-            }
+            GlobalAlloc::Static(def_id) => self.record_u8_ptr_value(self.static_addr_expr(def_id)),
             GlobalAlloc::VTable(ty, dyn_ty) => self.get_vtable_value(
                 ty,
                 dyn_ty

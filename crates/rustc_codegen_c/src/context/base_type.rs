@@ -67,7 +67,9 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             CTy::Float(CFloatTy::F64) => rustc_codegen_ssa::common::TypeKind::Double,
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => rustc_codegen_ssa::common::TypeKind::Pointer,
-                CTyKind::Array(_, _) => rustc_codegen_ssa::common::TypeKind::Array,
+                CTyKind::Array(_, _) | CTyKind::IncompleteArray(_) => {
+                    rustc_codegen_ssa::common::TypeKind::Array
+                }
                 CTyKind::Function { .. } => rustc_codegen_ssa::common::TypeKind::Function,
                 CTyKind::Struct(_) | CTyKind::Union(_) => {
                     rustc_codegen_ssa::common::TypeKind::Struct
@@ -89,7 +91,9 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     fn element_type(&self, ty: Self::Type) -> Self::Type {
         match ty {
             CTy::Ref(kind) => match kind.0 {
-                CTyKind::Pointer(inner) | CTyKind::Array(inner, _) => *inner,
+                CTyKind::Pointer(inner)
+                | CTyKind::Array(inner, _)
+                | CTyKind::IncompleteArray(inner) => *inner,
                 CTyKind::Function { .. } => panic!("function has no scalar element type"),
                 CTyKind::Struct(_) | CTyKind::Union(_) => {
                     panic!("aggregate has no scalar element type")

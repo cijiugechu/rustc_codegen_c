@@ -35,8 +35,7 @@ impl<'tcx, 'mx> PreDefineCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         symbol_name: &str,
     ) {
         let (c_linkage, c_visibility) = c_symbol_attrs(linkage, visibility);
-        self.register_static_symbol(def_id, symbol_name);
-        self.register_static_symbol_attrs(def_id, c_linkage, c_visibility);
+        self.register_static_symbol_info(def_id, symbol_name, c_linkage, c_visibility, true);
     }
 
     fn predefine_fn(

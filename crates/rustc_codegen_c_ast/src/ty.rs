@@ -94,7 +94,10 @@ impl<'mx> CTy<'mx> {
         )
     }
     pub fn is_array(&self) -> bool {
-        matches!(self, CTy::Ref(Interned(CTyKind::Array(_, _), _)))
+        matches!(
+            self,
+            CTy::Ref(Interned(CTyKind::Array(_, _) | CTyKind::IncompleteArray(_), _))
+        )
     }
 
     pub fn is_function(&self) -> bool {
@@ -207,6 +210,8 @@ pub enum CTyKind<'mx> {
     Pointer(CTy<'mx>),
     /// An array type with element type and size.
     Array(CTy<'mx>, usize),
+    /// An incomplete array type (`[]`) used by declaration-only contexts.
+    IncompleteArray(CTy<'mx>),
     /// A function type with return type and parameter types.
     Function { ret: CTy<'mx>, params: Vec<CTy<'mx>> },
     /// A struct type by name.
@@ -256,6 +261,7 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
         Ident(CValue<'mx>),
         Ptr,
         ArrayDim(usize),
+        ArrayUnknown,
         FuncParams(Vec<CTy<'mx>>),
         Lp,
         Rp,
@@ -272,6 +278,9 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                 }
                 DeclaratorPart::ArrayDim(dim) => {
                     ctx.word(format!("[{}]", dim));
+                }
+                DeclaratorPart::ArrayUnknown => {
+                    ctx.word("[]");
                 }
                 DeclaratorPart::FuncParams(params) => {
                     ctx.word("(");
@@ -307,6 +316,10 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                 }
                 CTyKind::Array(inner, dim) => {
                     decl_parts.push_back(DeclaratorPart::ArrayDim(*dim));
+                    ty = *inner;
+                }
+                CTyKind::IncompleteArray(inner) => {
+                    decl_parts.push_back(DeclaratorPart::ArrayUnknown);
                     ty = *inner;
                 }
                 CTyKind::Function { ret, params } => {
@@ -400,6 +413,21 @@ mod tests {
     }
 
     #[test]
+    fn test_print_declarator_incomplete_array() {
+        let mut ctx = setup_printer_ctx();
+        let i32_ty = CTy::Int(CIntTy::I32);
+        let array_kind = CTyKind::IncompleteArray(i32_ty);
+        let array_type = CTy::Ref(Interned::new_unchecked(&array_kind));
+        print_declarator(array_type, None, &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t []");
+
+        ctx = setup_printer_ctx();
+        let val = CValue::Local(0);
+        print_declarator(array_type, Some(val), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t _0[]");
+    }
+
+    #[test]
     fn test_print_declarator_complex() {
         let mut ctx = setup_printer_ctx();
         // Test pointer to array
@@ -422,6 +450,18 @@ mod tests {
         let val = CValue::Local(4);
         print_declarator(array_of_ptrs_type, Some(val), &mut ctx);
         assert_eq!(ctx.finish(), "int32_t (*_4[3])[5]");
+    }
+
+    #[test]
+    fn test_print_declarator_pointer_to_incomplete_array() {
+        let mut ctx = setup_printer_ctx();
+        let arr_kind = CTyKind::IncompleteArray(CTy::Int(CIntTy::I32));
+        let arr_ty = CTy::Ref(Interned::new_unchecked(&arr_kind));
+        let ptr_kind = CTyKind::Pointer(arr_ty);
+        let ptr_ty = CTy::Ref(Interned::new_unchecked(&ptr_kind));
+        let val = CValue::Local(1);
+        print_declarator(ptr_ty, Some(val), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t (*_1)[]");
     }
 
     #[test]

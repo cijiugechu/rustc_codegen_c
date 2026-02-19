@@ -591,7 +591,9 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
 
         self.value_ty(ptr).and_then(|ty| match ty {
             CTy::Ref(kind) => match kind.0 {
-                CTyKind::Pointer(elem) | CTyKind::Array(elem, _) => Some(*elem),
+                CTyKind::Pointer(elem)
+                | CTyKind::Array(elem, _)
+                | CTyKind::IncompleteArray(elem) => Some(*elem),
                 CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) | CTyKind::Union(_) => None,
             },
@@ -674,7 +676,9 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.record_value_ty(ptr, decl_ty);
         if let CTy::Ref(kind) = decl_ty {
             match kind.0 {
-                CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
+                CTyKind::Array(elem, _)
+                | CTyKind::IncompleteArray(elem)
+                | CTyKind::Pointer(elem) => {
                     self.update_ptr_pointee_ty(ptr, *elem)
                 }
                 CTyKind::Function { .. } => {}
@@ -715,6 +719,14 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => Some(self.tcx.data_layout.pointer_size().bytes() as usize),
                 CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
+                CTyKind::IncompleteArray(_) => {
+                    let msg = crate::context::validate_incomplete_array_usage(false).unwrap_err();
+                    self.cx
+                        .tcx
+                        .sess
+                        .dcx()
+                        .fatal(format!("{msg} and has no size"));
+                }
                 CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) | CTyKind::Union(_) => {
                     self.struct_layout_info(ty).map(|info| info.size)
@@ -1576,7 +1588,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             if i == 0 && const_index == Some(0) && indices.len() > 1 {
                 if let CTy::Ref(kind) = projected_ty {
                     match kind.0 {
-                        CTyKind::Array(elem, _) | CTyKind::Pointer(elem) => {
+                        CTyKind::Array(elem, _)
+                        | CTyKind::IncompleteArray(elem)
+                        | CTyKind::Pointer(elem) => {
                             projected_ty = *elem;
                         }
                         CTyKind::Function { .. } => {
@@ -1609,7 +1623,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
             projected_ty = match projected_ty {
                 CTy::Ref(kind) => match kind.0 {
-                    CTyKind::Array(elem, _) => {
+                    CTyKind::Array(elem, _) | CTyKind::IncompleteArray(elem) => {
                         let idx_expr = if let Some(index) = const_index {
                             self.mcx.value(CValue::Scalar(index as i128))
                         } else {
