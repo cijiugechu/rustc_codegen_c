@@ -1062,11 +1062,31 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_unchecked_integer_binop_ty(lhs, rhs, "urem");
+        if !matches!(ty, CTy::UInt(_)) {
+            panic!("unsupported type for urem: {ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "%");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {
-        todo!()
+        let ty = self.infer_integer_binop_ty(lhs, rhs, "srem");
+        if !matches!(ty, CTy::Int(_)) {
+            panic!("unsupported type for srem: {ty:?}");
+        }
+        let ret = self.bb.func.0.next_local_var();
+        let lhs = self.coerce_int_operand_expr(lhs, ty);
+        let rhs = self.coerce_int_operand_expr(rhs, ty);
+        let expr = self.mcx.binary(lhs, rhs, "%");
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value {

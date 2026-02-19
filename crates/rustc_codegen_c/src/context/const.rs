@@ -1,7 +1,7 @@
 use rustc_abi::{Float as AbiFloat, Primitive};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
-use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods};
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 use rustc_data_structures::intern::Interned;
@@ -48,7 +48,59 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         next
     }
 
+    fn integer_scalar_shape(&self, ty: CTy<'mx>) -> Option<(u32, bool)> {
+        match ty {
+            CTy::Bool => Some((1, false)),
+            CTy::Int(int) => {
+                let bits = match int {
+                    CIntTy::I8 => 8,
+                    CIntTy::I16 => 16,
+                    CIntTy::I32 => 32,
+                    CIntTy::I64 => 64,
+                    CIntTy::Isize => self.tcx.data_layout.pointer_size().bits() as u32,
+                };
+                Some((bits, true))
+            }
+            CTy::UInt(uint) => {
+                let bits = match uint {
+                    CUintTy::U8 => 8,
+                    CUintTy::U16 => 16,
+                    CUintTy::U32 => 32,
+                    CUintTy::U64 => 64,
+                    CUintTy::Usize => self.tcx.data_layout.pointer_size().bits() as u32,
+                };
+                Some((bits, false))
+            }
+            _ => None,
+        }
+    }
+
+    fn normalize_integer_scalar_for_ty(&self, value: i128, ty: CTy<'mx>) -> i128 {
+        let Some((bits, signed)) = self.integer_scalar_shape(ty) else {
+            return value;
+        };
+
+        let bits = bits.clamp(1, 128);
+        if bits == 128 {
+            return value;
+        }
+
+        let mask = (1u128 << bits) - 1;
+        let truncated = (value as u128) & mask;
+        if signed {
+            let sign_bit = 1u128 << (bits - 1);
+            if truncated & sign_bit != 0 {
+                (truncated | (!mask)) as i128
+            } else {
+                truncated as i128
+            }
+        } else {
+            truncated as i128
+        }
+    }
+
     fn typed_scalar(&self, value: i128, ty: CTy<'mx>) -> CValue<'mx> {
+        let value = self.normalize_integer_scalar_for_ty(value, ty);
         let scalar = CValue::ScalarTyped(value, self.next_scalar_id());
         if let Some(fkey) = self.current_fkey.get() {
             self.value_tys.borrow_mut().insert((fkey, scalar), ty);
