@@ -242,6 +242,7 @@ impl TestCommand {
         let mut stderr = None;
         let mut stdout_file = None;
         let mut stderr_file = None;
+        let mut run_env = Vec::new();
 
         // Check each directive
         for directive in directives {
@@ -252,6 +253,7 @@ impl TestCommand {
                 TestDirective::CheckStdoutFile(path) => stdout_file = Some(path),
                 TestDirective::CheckStderrFile(path) => stderr_file = Some(path),
                 TestDirective::ExitCode(expected) => exitcode = Some(expected),
+                TestDirective::RunEnv(key, value) => run_env.push((key, value)),
                 TestDirective::AuxBuild(_) => {
                     // AuxBuild directives are handled during test collection
                     // No need to check them during test execution
@@ -276,7 +278,8 @@ impl TestCommand {
                 || stdout.is_some()
                 || stderr.is_some()
                 || stdout_file.is_some()
-                || stderr_file.is_some())
+                || stderr_file.is_some()
+                || !run_env.is_empty())
         {
             panic!("Directives conflicts, lack of '//@ run-pass'");
         }
@@ -290,6 +293,7 @@ impl TestCommand {
                     stderr,
                     stdout_file,
                     stderr_file,
+                    &run_env,
                 );
             } else {
                 self.log_action_context(
@@ -310,10 +314,15 @@ impl TestCommand {
         expected_stderr: Option<String>,
         expected_stdout_file: Option<String>,
         expected_stderr_file: Option<String>,
+        run_env: &[(String, String)],
     ) {
         // Run the test
         self.log_action_context("running", &testcase.output_file.display());
-        let output = std::process::Command::new(&testcase.output_file)
+        let mut command = std::process::Command::new(&testcase.output_file);
+        for (key, value) in run_env {
+            command.env(key, value);
+        }
+        let output = command
             .output()
             .unwrap_or_else(|e| panic!("failed to run {}: {}", testcase.output_file.display(), e));
 
@@ -527,6 +536,7 @@ impl TestCase {
         let stdout_file_re = regex::Regex::new(r"^//@\s*check-stdout-file:\s*(.*)").unwrap();
         let stderr_file_re = regex::Regex::new(r"^//@\s*check-stderr-file:\s*(.*)").unwrap();
         let exit_re = regex::Regex::new(r"^//@\s*exit-code:\s*(\d+)").unwrap();
+        let run_env_re = regex::Regex::new(r"^//@\s*run-env:\s*(.*)").unwrap();
         let aux_re = regex::Regex::new(r"^//@\s*aux-build:\s*(.*)").unwrap();
         // Regex to match any directive pattern
         let directive_re = regex::Regex::new(r"^//@\s*([^:]+)").unwrap();
@@ -556,13 +566,33 @@ impl TestCase {
                         line_num + 1
                     );
                 }
+            } else if let Some(cap) = run_env_re.captures(line) {
+                let run_env = cap[1].trim();
+                let Some((key, value)) = run_env.split_once('=') else {
+                    panic!(
+                        "{}:{}: invalid run-env directive `{}` (expected KEY=VALUE)",
+                        self.source.display(),
+                        line_num + 1,
+                        run_env
+                    );
+                };
+                let key = key.trim();
+                if key.is_empty() {
+                    panic!(
+                        "{}:{}: invalid run-env directive `{}` (empty key)",
+                        self.source.display(),
+                        line_num + 1,
+                        run_env
+                    );
+                }
+                directives.push(TestDirective::RunEnv(key.to_string(), value.to_string()));
             } else if let Some(cap) = aux_re.captures(line) {
                 let fname = cap[1].trim().to_string();
                 directives.push(TestDirective::AuxBuild(fname));
             } else if let Some(cap) = directive_re.captures(line) {
                 let directive_name = cap[1].trim();
                 panic!(
-                    "{}:{}: unknown directive '{}', supported directives are: run-pass, check-stdout, check-stderr, check-stdout-file, check-stderr-file, exit-code, aux-build",
+                    "{}:{}: unknown directive '{}', supported directives are: run-pass, check-stdout, check-stderr, check-stdout-file, check-stderr-file, exit-code, run-env, aux-build",
                     self.source.display(),
                     line_num + 1,
                     directive_name
@@ -635,6 +665,8 @@ enum TestDirective {
     CheckStderrFile(String),
     /// Expected exit code
     ExitCode(i32),
+    /// Environment variables to inject when running a run-pass test.
+    RunEnv(String, String),
     /// Auxiliary build requirement
     AuxBuild(String),
 }
