@@ -593,7 +593,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(elem) | CTyKind::Array(elem, _) => Some(*elem),
                 CTyKind::Function { .. } => None,
-                CTyKind::Struct(_) => None,
+                CTyKind::Struct(_) | CTyKind::Union(_) => None,
             },
             _ => None,
         })
@@ -678,7 +678,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                     self.update_ptr_pointee_ty(ptr, *elem)
                 }
                 CTyKind::Function { .. } => {}
-                CTyKind::Struct(_) => {}
+                CTyKind::Struct(_) | CTyKind::Union(_) => {}
             }
         }
 
@@ -716,7 +716,9 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CTyKind::Pointer(_) => Some(self.tcx.data_layout.pointer_size().bytes() as usize),
                 CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
                 CTyKind::Function { .. } => None,
-                CTyKind::Struct(_) => self.struct_layout_info(ty).map(|info| info.size),
+                CTyKind::Struct(_) | CTyKind::Union(_) => {
+                    self.struct_layout_info(ty).map(|info| info.size)
+                }
             },
             _ => None,
         }
@@ -1438,11 +1440,11 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn range_metadata(&mut self, load: Self::Value, range: rustc_abi::WrappingRange) {
-        todo!()
+        let _ = (load, range);
     }
 
     fn nonnull_metadata(&mut self, load: Self::Value) {
-        todo!()
+        let _ = load;
     }
 
     fn store(
@@ -1537,7 +1539,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     fn gep(&mut self, ty: Self::Type, ptr: Self::Value, indices: &[Self::Value]) -> Self::Value {
         let mut expr = self.mcx.value(ptr);
         if let Some(CTy::Ref(kind)) = self.value_ty(ptr) {
-            if matches!(kind.0, CTyKind::Struct(_)) && ty != CTy::Ref(kind) {
+            if matches!(kind.0, CTyKind::Struct(_) | CTyKind::Union(_)) && ty != CTy::Ref(kind) {
                 let cast_ptr_ty = self.pointer_to(ty);
                 let cast_ptr = self.bb.func.0.next_local_var();
                 let addr = self.mcx.unary("&", self.mcx.value(ptr));
@@ -1580,16 +1582,19 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                         CTyKind::Function { .. } => {
                             panic!("gep cannot project into function type")
                         }
-                        CTyKind::Struct(_) => {}
+                        CTyKind::Struct(_) | CTyKind::Union(_) => {}
                     }
                 }
                 continue;
             }
 
-            // The first index on a pointer-to-struct is element stepping (array semantics),
-            // not a field projection. Keep the pointee type as the same struct.
+            // The first index on a pointer-to-aggregate is element stepping (array semantics),
+            // not a field projection. Keep the pointee type as the same aggregate.
             if i == 0
-                && matches!(projected_ty, CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_)))
+                && matches!(
+                    projected_ty,
+                    CTy::Ref(kind) if matches!(kind.0, CTyKind::Struct(_) | CTyKind::Union(_))
+                )
             {
                 let idx_expr = if let Some(index) = const_index {
                     self.mcx.value(CValue::Scalar(index as i128))
@@ -1625,12 +1630,12 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     CTyKind::Function { .. } => {
                         panic!("gep cannot index function type")
                     }
-                    CTyKind::Struct(_) => {
+                    CTyKind::Struct(_) | CTyKind::Union(_) => {
                         let index = const_index.unwrap_or_else(|| {
-                            panic!("gep on struct fields requires constant index")
+                            panic!("gep on aggregate fields requires constant index")
                         });
                         let info = self.struct_layout_info(projected_ty).unwrap_or_else(|| {
-                            panic!("missing struct layout metadata for {projected_ty:?}")
+                            panic!("missing aggregate layout metadata for {projected_ty:?}")
                         });
                         let field = info
                             .fields
@@ -2361,7 +2366,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn set_invariant_load(&mut self, load: Self::Value) {
-        todo!()
+        let _ = load;
     }
 
     fn lifetime_start(&mut self, ptr: Self::Value, size: rustc_abi::Size) {

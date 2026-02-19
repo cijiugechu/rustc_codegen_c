@@ -1,4 +1,5 @@
 use rustc_abi::{BackendRepr, Float as AbiFloat, Integer, Primitive, RegKind};
+use rustc_codegen_c_ast::cunion::{CUnionDef, CUnionField};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
@@ -130,6 +131,84 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         self.mcx.module().push_struct(CStructDef {
             name,
             fields: fields.iter().map(|f| CStructField { name: f.name, ty: f.ty }).collect(),
+        });
+
+        cty
+    }
+
+    pub(crate) fn define_union_layout(
+        &self,
+        layout: TyAndLayout<'tcx>,
+        adt_def: rustc_middle::ty::AdtDef<'tcx>,
+        args: rustc_middle::ty::GenericArgsRef<'tcx>,
+    ) -> CTy<'mx> {
+        if let Some(ty) = self.adt_types.borrow().get(&layout.ty).copied() {
+            return ty;
+        }
+
+        if !adt_def.is_union() {
+            panic!("expected union ADT, got {}", adt_def.descr());
+        }
+
+        let size = layout.size.bytes_usize();
+        if size == 0 {
+            self.tcx
+                .sess
+                .dcx()
+                .fatal(format!("unsupported zero-sized union layout for {:?}", layout.ty));
+        }
+
+        let name = if adt_def.repr().c() && args.is_empty() {
+            self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str())
+        } else {
+            self.mcx.alloc_str(&format!("__rcgenc_union_{}", self.next_synthetic_type_id()))
+        };
+        let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Union(name))));
+
+        let variant = adt_def.non_enum_variant();
+        let mut fields = Vec::with_capacity(variant.fields.len());
+        for (i, field) in variant.fields.iter().enumerate() {
+            let rust_name = field.name.as_str();
+            let field_name = if is_valid_c_identifier(rust_name) {
+                self.mcx.alloc_str(rust_name)
+            } else {
+                self.mcx.alloc_str(&format!("f{i}"))
+            };
+            let field_layout = layout.field(&*self, i);
+            let offset = layout.fields.offset(i).bytes_usize();
+            if offset != 0 {
+                self.tcx.sess.dcx().fatal(format!(
+                    "unsupported union field offset {offset} for {:?} field {i}; expected 0",
+                    layout.ty
+                ));
+            }
+            let field_cty = if field_layout.size.bytes() == 0 {
+                CTy::UInt(CUintTy::U8)
+            } else {
+                self.backend_type(field_layout)
+            };
+            fields.push(AdtFieldLayout {
+                index: i,
+                name: field_name,
+                ty: field_cty,
+                offset,
+                size: field_layout.size.bytes_usize(),
+            });
+        }
+
+        let layout_info = AdtLayoutInfo {
+            size,
+            align: layout.align.abi.bytes() as usize,
+            repr_c: adt_def.repr().c(),
+            fields: fields.clone(),
+        };
+
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
+        self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
+        self.struct_layouts.borrow_mut().insert(cty, layout_info);
+        self.mcx.module().push_union(CUnionDef {
+            name,
+            fields: fields.iter().map(|f| CUnionField { name: f.name, ty: f.ty }).collect(),
         });
 
         cty
@@ -280,6 +359,8 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                     self.immediate_backend_type(layout)
                 } else if adt_def.is_enum() {
                     self.define_data_enum_layout(layout, *adt_def)
+                } else if adt_def.is_union() {
+                    self.define_union_layout(layout, *adt_def, args)
                 } else {
                     self.define_simple_struct_layout(layout, *adt_def, args)
                 }

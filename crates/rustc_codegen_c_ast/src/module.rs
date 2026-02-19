@@ -2,11 +2,18 @@
 
 use std::cell::RefCell;
 
+use crate::cunion::CUnionDef;
 use crate::cstruct::CStructDef;
 use crate::decl::CDecl;
 use crate::func::{print_func_decl, CFunc};
 use crate::include::{canonicalize_include, render_include_block, IncludeKind, IncludeSet};
 use crate::pretty::{Print, PrinterCtx};
+
+#[derive(Debug, Clone, Copy)]
+enum AggregateDefRef {
+    Union(usize),
+    Struct(usize),
+}
 
 /// C module definition.
 #[derive(Debug, Clone)]
@@ -18,7 +25,11 @@ pub struct Module<'mx> {
     /// Declarations.
     pub decls: RefCell<Vec<CDecl<'mx>>>,
     /// Struct declarations.
+    pub unions: RefCell<Vec<CUnionDef<'mx>>>,
+    /// Struct declarations.
     pub structs: RefCell<Vec<CStructDef<'mx>>>,
+    /// Aggregate declaration order, preserving dependency-friendly emission order.
+    aggregate_order: RefCell<Vec<AggregateDefRef>>,
     /// Function definitions.
     pub funcs: RefCell<Vec<CFunc<'mx>>>,
 }
@@ -30,7 +41,9 @@ impl<'mx> Module<'mx> {
             includes: RefCell::new(IncludeSet::new()),
             helper,
             decls: RefCell::new(Vec::new()),
+            unions: RefCell::new(Vec::new()),
             structs: RefCell::new(Vec::new()),
+            aggregate_order: RefCell::new(Vec::new()),
             funcs: RefCell::new(Vec::new()),
         }
     }
@@ -51,8 +64,19 @@ impl<'mx> Module<'mx> {
     }
 
     /// Push a struct declaration to the end of the declarations list.
+    pub fn push_union(&self, def: CUnionDef<'mx>) {
+        let mut unions = self.unions.borrow_mut();
+        unions.push(def);
+        let index = unions.len() - 1;
+        self.aggregate_order.borrow_mut().push(AggregateDefRef::Union(index));
+    }
+
+    /// Push a struct declaration to the end of the declarations list.
     pub fn push_struct(&self, def: CStructDef<'mx>) {
-        self.structs.borrow_mut().push(def);
+        let mut structs = self.structs.borrow_mut();
+        structs.push(def);
+        let index = structs.len() - 1;
+        self.aggregate_order.borrow_mut().push(AggregateDefRef::Struct(index));
     }
 
     /// Push a function definition to the end of the function definitions list.
@@ -78,10 +102,14 @@ impl Print for Module<'_> {
 
             ctx.word(self.helper);
 
-            for def in self.structs.borrow().iter() {
+            let aggregate_order = self.aggregate_order.borrow().clone();
+            for aggregate in aggregate_order {
                 ctx.hardbreak();
                 ctx.hardbreak();
-                def.print_to(ctx);
+                match aggregate {
+                    AggregateDefRef::Union(idx) => self.unions.borrow()[idx].print_to(ctx),
+                    AggregateDefRef::Struct(idx) => self.structs.borrow()[idx].print_to(ctx),
+                }
             }
 
             for &func in self.funcs.borrow().iter() {

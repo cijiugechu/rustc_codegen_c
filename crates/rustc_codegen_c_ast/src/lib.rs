@@ -18,6 +18,7 @@ extern crate rustc_driver;
 extern crate rustc_type_ir;
 
 pub mod arena;
+pub mod cunion;
 pub mod cstruct;
 pub mod decl;
 pub mod expr;

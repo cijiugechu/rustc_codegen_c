@@ -211,6 +211,8 @@ pub enum CTyKind<'mx> {
     Function { ret: CTy<'mx>, params: Vec<CTy<'mx>> },
     /// A struct type by name.
     Struct(&'mx str),
+    /// A union type by name.
+    Union(&'mx str),
 }
 
 impl<'mx> ModuleCtx<'mx> {
@@ -312,6 +314,7 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                     ty = *ret;
                 }
                 CTyKind::Struct(name) => break format!("struct {name}"),
+                CTyKind::Union(name) => break format!("union {name}"),
             },
             _ => break ty.to_str().to_string(),
         }
@@ -452,5 +455,27 @@ mod tests {
 
         print_declarator(array_ty, Some(val), &mut ctx);
         assert_eq!(ctx.finish(), "int32_t (*_7[2])(void)");
+    }
+
+    #[test]
+    fn test_print_declarator_union() {
+        let mut ctx = setup_printer_ctx();
+        let union_kind = CTyKind::Union("U");
+        let union_ty = CTy::Ref(Interned::new_unchecked(&union_kind));
+
+        print_declarator(union_ty, None, &mut ctx);
+        assert_eq!(ctx.finish(), "union U");
+    }
+
+    #[test]
+    fn test_print_declarator_union_pointer() {
+        let mut ctx = setup_printer_ctx();
+        let union_kind = CTyKind::Union("U");
+        let union_ty = CTy::Ref(Interned::new_unchecked(&union_kind));
+        let union_ptr_kind = CTyKind::Pointer(union_ty);
+        let union_ptr_ty = CTy::Ref(Interned::new_unchecked(&union_ptr_kind));
+
+        print_declarator(union_ptr_ty, None, &mut ctx);
+        assert_eq!(ctx.finish(), "union U *");
     }
 }

@@ -294,6 +294,17 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.store(is_equal, llresult.val.llval, llresult.val.align);
                 Ok(())
             }
+            sym::catch_unwind => {
+                // With panic=abort there is no unwind path. Execute the body and report success.
+                let try_fn = args[0].immediate();
+                let data = args[1].immediate();
+                let _catch_fn = args[2].immediate();
+
+                let call = self.mcx.call(self.mcx.value(try_fn), vec![self.mcx.value(data)]);
+                self.bb.func.0.push_stmt(self.mcx.expr_stmt(call));
+                self.store(self.const_i32(0), llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
             _ => Err(instance),
         }
     }

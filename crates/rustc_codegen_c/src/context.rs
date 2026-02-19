@@ -80,6 +80,7 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
     Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
     Struct(&'mx str),
+    Union(&'mx str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,7 +347,8 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
     fn predeclare_repr_c_structs(&self) {
         for def_id in self.tcx.hir_crate_items(()).definitions() {
-            if self.tcx.def_kind(def_id) != DefKind::Struct {
+            let def_kind = self.tcx.def_kind(def_id);
+            if !matches!(def_kind, DefKind::Struct | DefKind::Union) {
                 continue;
             }
 
@@ -372,7 +374,11 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
             if all_primitive_ints {
                 let layout = self.layout_of(ty);
-                self.define_simple_struct_layout(layout, *adt_def, args);
+                if adt_def.is_union() {
+                    self.define_union_layout(layout, *adt_def, args);
+                } else {
+                    self.define_simple_struct_layout(layout, *adt_def, args);
+                }
             }
         }
     }
@@ -635,6 +641,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                         .collect(),
                 },
                 CTyKind::Struct(name) => AbiTupleFieldKey::Struct(name),
+                CTyKind::Union(name) => AbiTupleFieldKey::Union(name),
             },
         }
     }
@@ -683,7 +690,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     Some((elem_size.saturating_mul(*count), elem_align))
                 }
                 CTyKind::Function { .. } => None,
-                CTyKind::Struct(_) => {
+                CTyKind::Struct(_) | CTyKind::Union(_) => {
                     let info = self.struct_layouts.borrow().get(&ty)?.clone();
                     Some((info.size, info.align))
                 }
