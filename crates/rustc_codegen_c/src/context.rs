@@ -484,6 +484,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 matches!(
                     field_ty.kind(),
                     rustc_type_ir::TyKind::Bool
+                        | rustc_type_ir::TyKind::Char
                         | rustc_type_ir::TyKind::Int(_)
                         | rustc_type_ir::TyKind::Uint(_)
                 )
