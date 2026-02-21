@@ -197,7 +197,7 @@ mod tests {
     use crate::expr::CValue;
     use crate::pretty::{Print, PrinterCtx};
     use crate::symbol::{CLinkage, CVisibility};
-    use crate::ty::{CTy, CTyKind, CIntTy, CUintTy};
+    use crate::ty::{CIntTy, CTy, CTyKind, CUintTy};
     use crate::{ModuleArena, ModuleCtx};
     use rustc_data_structures::intern::Interned;
 
@@ -232,17 +232,15 @@ mod tests {
             Some("foo$bar"),
             false,
         );
-        assert_eq!(
-            render_decl(decl),
-            "extern uint8_t __rcgenc__5Ffoo __asm__(\"foo$bar\");"
-        );
+        assert_eq!(render_decl(decl), "extern uint8_t __rcgenc__5Ffoo __asm__(\"foo$bar\");");
     }
 
     #[test]
     fn prints_extern_incomplete_array_with_link_name() {
         let arena = ModuleArena::new("");
         let mcx = ModuleCtx(&arena);
-        let ty = CTy::Ref(Interned::new_unchecked(&CTyKind::IncompleteArray(CTy::UInt(CUintTy::U8))));
+        let ty =
+            CTy::Ref(Interned::new_unchecked(&CTyKind::IncompleteArray(CTy::UInt(CUintTy::U8))));
         let decl = mcx.extern_var_with_attrs(
             CValue::Func("__rcgenc_x"),
             ty,
@@ -250,10 +248,7 @@ mod tests {
             Some("x$y"),
             false,
         );
-        assert_eq!(
-            render_decl(decl),
-            "extern uint8_t __rcgenc_x[] __asm__(\"x$y\");"
-        );
+        assert_eq!(render_decl(decl), "extern uint8_t __rcgenc_x[] __asm__(\"x$y\");");
     }
 
     #[test]
@@ -315,7 +310,8 @@ mod tests {
     fn rejects_non_extern_incomplete_array_declaration() {
         let arena = ModuleArena::new("");
         let mcx = ModuleCtx(&arena);
-        let ty = CTy::Ref(Interned::new_unchecked(&CTyKind::IncompleteArray(CTy::Int(CIntTy::I32))));
+        let ty =
+            CTy::Ref(Interned::new_unchecked(&CTyKind::IncompleteArray(CTy::Int(CIntTy::I32))));
         let _ = mcx.var_with_symbol_attrs(
             CValue::Func("bad"),
             ty,

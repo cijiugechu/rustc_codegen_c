@@ -24,7 +24,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn type_i128(&self) -> Self::Type {
-        todo!()
+        self.mcx.get_int_type(IntTy::I128)
     }
 
     fn type_isize(&self) -> Self::Type {
@@ -125,6 +125,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
                 rustc_codegen_c_ast::ty::CIntTy::I16 => 16,
                 rustc_codegen_c_ast::ty::CIntTy::I32 => 32,
                 rustc_codegen_c_ast::ty::CIntTy::I64 => 64,
+                rustc_codegen_c_ast::ty::CIntTy::I128 => 128,
             },
             CTy::UInt(int) => match int {
                 rustc_codegen_c_ast::ty::CUintTy::Usize => {
@@ -134,6 +135,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
                 rustc_codegen_c_ast::ty::CUintTy::U16 => 16,
                 rustc_codegen_c_ast::ty::CUintTy::U32 => 32,
                 rustc_codegen_c_ast::ty::CUintTy::U64 => 64,
+                rustc_codegen_c_ast::ty::CUintTy::U128 => 128,
             },
             _ => panic!("not an integer type: {ty:?}"),
         }

@@ -144,10 +144,7 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             } else {
                 CLinkage::External
             };
-            (
-                self.declare_c_func_with_signature(&decl_name, link_name, &signature, linkage),
-                false,
-            )
+            (self.declare_c_func_with_signature(&decl_name, link_name, &signature, linkage), false)
         };
 
         if is_always_false_intrinsic(symbol_name) {
@@ -202,8 +199,12 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 func
             }
         } else {
-            let func = CFuncKind::new(self.mcx.alloc_str("rust_eh_personality"), CTy::Int(CIntTy::I32), [])
-                .with_linkage(CLinkage::Weak);
+            let func = CFuncKind::new(
+                self.mcx.alloc_str("rust_eh_personality"),
+                CTy::Int(CIntTy::I32),
+                [],
+            )
+            .with_linkage(CLinkage::Weak);
             let func = Interned::new_unchecked(self.mcx.func(func));
             self.mcx.module().push_func(func);
             func

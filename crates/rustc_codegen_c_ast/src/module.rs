@@ -1,9 +1,9 @@
 //! This module defines AST nodes for C modules.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
-use crate::cunion::CUnionDef;
 use crate::cstruct::CStructDef;
+use crate::cunion::CUnionDef;
 use crate::decl::CDecl;
 use crate::func::{print_func_decl, CFunc};
 use crate::include::{canonicalize_include, render_include_block, IncludeKind, IncludeSet};
@@ -32,6 +32,8 @@ pub struct Module<'mx> {
     aggregate_order: RefCell<Vec<AggregateDefRef>>,
     /// Function definitions.
     pub funcs: RefCell<Vec<CFunc<'mx>>>,
+    /// Whether the emitted module uses i128/u128 lowering helpers.
+    pub requires_int128: Cell<bool>,
 }
 
 impl<'mx> Module<'mx> {
@@ -45,6 +47,7 @@ impl<'mx> Module<'mx> {
             structs: RefCell::new(Vec::new()),
             aggregate_order: RefCell::new(Vec::new()),
             funcs: RefCell::new(Vec::new()),
+            requires_int128: Cell::new(false),
         }
     }
 
@@ -83,6 +86,11 @@ impl<'mx> Module<'mx> {
     pub fn push_func(&self, func: CFunc<'mx>) {
         self.funcs.borrow_mut().push(func);
     }
+
+    /// Mark that this module requires native `__int128` support.
+    pub fn require_int128(&self) {
+        self.requires_int128.set(true);
+    }
 }
 
 impl Print for Module<'_> {
@@ -97,6 +105,18 @@ impl Print for Module<'_> {
                     ctx.word(line.to_string());
                     ctx.hardbreak();
                 }
+                ctx.hardbreak();
+            }
+
+            if self.requires_int128.get() {
+                ctx.word("#if !defined(__SIZEOF_INT128__)");
+                ctx.hardbreak();
+                ctx.word(
+                    "#error \"rustc_codegen_c requires __int128 support when lowering i128/u128\"",
+                );
+                ctx.hardbreak();
+                ctx.word("#endif");
+                ctx.hardbreak();
                 ctx.hardbreak();
             }
 

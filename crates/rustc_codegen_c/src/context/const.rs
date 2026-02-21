@@ -57,6 +57,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     CIntTy::I16 => 16,
                     CIntTy::I32 => 32,
                     CIntTy::I64 => 64,
+                    CIntTy::I128 => 128,
                     CIntTy::Isize => self.tcx.data_layout.pointer_size().bits() as u32,
                 };
                 Some((bits, true))
@@ -67,6 +68,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     CUintTy::U16 => 16,
                     CUintTy::U32 => 32,
                     CUintTy::U64 => 64,
+                    CUintTy::U128 => 128,
                     CUintTy::Usize => self.tcx.data_layout.pointer_size().bits() as u32,
                 };
                 Some((bits, false))
@@ -215,7 +217,7 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn const_u128(&self, i: u128) -> Self::Value {
-        CValue::Scalar(i as i128)
+        self.typed_scalar(i as i128, self.mcx.get_uint_type(UintTy::U128))
     }
 
     fn const_usize(&self, i: u64) -> Self::Value {

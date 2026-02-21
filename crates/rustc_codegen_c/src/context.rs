@@ -506,6 +506,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
             (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
             (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            (RegKind::Integer, 9..=16) => CTy::UInt(CUintTy::U128),
             (RegKind::Float, 4) => CTy::Float(CFloatTy::F32),
             (RegKind::Float, 8) => CTy::Float(CFloatTy::F64),
             _ => panic!("unsupported ABI register for C backend: {reg:?}"),
@@ -777,6 +778,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     rustc_codegen_c_ast::ty::CIntTy::I16 => 2,
                     rustc_codegen_c_ast::ty::CIntTy::I32 => 4,
                     rustc_codegen_c_ast::ty::CIntTy::I64 => 8,
+                    rustc_codegen_c_ast::ty::CIntTy::I128 => 16,
                     rustc_codegen_c_ast::ty::CIntTy::Isize => {
                         self.tcx.data_layout.pointer_size().bytes() as usize
                     }
@@ -789,6 +791,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     CUintTy::U16 => 2,
                     CUintTy::U32 => 4,
                     CUintTy::U64 => 8,
+                    CUintTy::U128 => 16,
                     CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
                 };
                 Some((bytes, bytes))
@@ -890,7 +893,9 @@ pub(crate) fn validate_static_definition_transition(
     Ok(())
 }
 
-pub(crate) fn validate_incomplete_array_usage(is_extern_declaration: bool) -> Result<(), &'static str> {
+pub(crate) fn validate_incomplete_array_usage(
+    is_extern_declaration: bool,
+) -> Result<(), &'static str> {
     if is_extern_declaration {
         Ok(())
     } else {
@@ -907,7 +912,10 @@ mod tests {
 
     #[test]
     fn extern_static_first_reference_emits_declaration_then_dedups() {
-        assert_eq!(static_extern_decl_action(false, false, false), StaticExternDeclAction::EmitExtern);
+        assert_eq!(
+            static_extern_decl_action(false, false, false),
+            StaticExternDeclAction::EmitExtern
+        );
         assert_eq!(static_extern_decl_action(false, true, false), StaticExternDeclAction::Skip);
     }
 

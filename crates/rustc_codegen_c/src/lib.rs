@@ -57,8 +57,7 @@ rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 #[derive(Clone)]
 pub struct CCodegen {}
 
-const PANIC_ABORT_REQUIRED_MSG: &str =
-    "rustc_codegen_c currently supports only `panic=abort`.";
+const PANIC_ABORT_REQUIRED_MSG: &str = "rustc_codegen_c currently supports only `panic=abort`.";
 
 fn validate_panic_strategy(strategy: PanicStrategy) -> Result<(), &'static str> {
     if matches!(strategy, PanicStrategy::Abort) {
@@ -284,7 +283,7 @@ pub fn __rustc_codegen_backend() -> Box<dyn CodegenBackend> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PANIC_ABORT_REQUIRED_MSG, validate_panic_strategy};
+    use super::{validate_panic_strategy, PANIC_ABORT_REQUIRED_MSG};
     use rustc_target::spec::PanicStrategy;
 
     #[test]

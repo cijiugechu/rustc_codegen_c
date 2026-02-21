@@ -115,12 +115,27 @@ impl<'mx> ModuleCtx<'mx> {
     }
 }
 
+fn format_scalar_constant(value: i128) -> String {
+    if value >= i64::MIN as i128 && value <= i64::MAX as i128 {
+        return value.to_string();
+    }
+
+    if value >= 0 && value <= u64::MAX as i128 {
+        return format!("{value}ULL");
+    }
+
+    let bits = value as u128;
+    let hi = (bits >> 64) as u64;
+    let lo = bits as u64;
+    format!("__rust_i128_from_parts({hi}ULL, {lo}ULL)")
+}
+
 impl Print for CValue<'_> {
     fn print_to(&self, ctx: &mut PrinterCtx) {
         match self {
-            CValue::Scalar(i) => ctx.word(i.to_string()),
+            CValue::Scalar(i) => ctx.word(format_scalar_constant(*i)),
             CValue::RealLiteral(i) => ctx.word(i.to_string()),
-            CValue::ScalarTyped(i, _) => ctx.word(i.to_string()),
+            CValue::ScalarTyped(i, _) => ctx.word(format_scalar_constant(*i)),
             CValue::Local(i) => ctx.word(format!("_{}", i)),
             CValue::Func(name) => ctx.word(name.to_string()),
         }
@@ -202,5 +217,35 @@ impl Print for CExpr<'_> {
                 ctx.word("]");
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_scalar_constant, CValue};
+    use crate::pretty::{Print, PrinterCtx};
+
+    #[test]
+    fn scalar_prints_decimal_within_i64_range() {
+        assert_eq!(format_scalar_constant(-42), "-42");
+        assert_eq!(format_scalar_constant(i64::MAX as i128), i64::MAX.to_string());
+    }
+
+    #[test]
+    fn scalar_prints_ull_suffix_for_u64_range() {
+        let value = (i64::MAX as u128 + 7) as i128;
+        assert_eq!(format_scalar_constant(value), format!("{value}ULL"));
+    }
+
+    #[test]
+    fn scalar_prints_split_parts_for_large_128_values() {
+        assert_eq!(
+            format_scalar_constant(i128::MIN),
+            "__rust_i128_from_parts(9223372036854775808ULL, 0ULL)"
+        );
+
+        let mut ctx = PrinterCtx::new();
+        CValue::ScalarTyped(i128::MIN, 0).print_to(&mut ctx);
+        assert_eq!(ctx.finish(), "__rust_i128_from_parts(9223372036854775808ULL, 0ULL)");
     }
 }

@@ -94,10 +94,7 @@ impl<'mx> CTy<'mx> {
         )
     }
     pub fn is_array(&self) -> bool {
-        matches!(
-            self,
-            CTy::Ref(Interned(CTyKind::Array(_, _) | CTyKind::IncompleteArray(_), _))
-        )
+        matches!(self, CTy::Ref(Interned(CTyKind::Array(_, _) | CTyKind::IncompleteArray(_), _)))
     }
 
     pub fn is_function(&self) -> bool {
@@ -113,6 +110,7 @@ pub enum CIntTy {
     I16,
     I32,
     I64,
+    I128,
 }
 
 impl CIntTy {
@@ -124,6 +122,7 @@ impl CIntTy {
             CIntTy::I16 => CUintTy::U16,
             CIntTy::I32 => CUintTy::U32,
             CIntTy::I64 => CUintTy::U64,
+            CIntTy::I128 => CUintTy::U128,
         }
     }
 
@@ -135,6 +134,7 @@ impl CIntTy {
             CIntTy::I16 => "int16_t",
             CIntTy::I32 => "int32_t",
             CIntTy::I64 => "int64_t",
+            CIntTy::I128 => "__rcgenc_i128",
         }
     }
 
@@ -146,6 +146,7 @@ impl CIntTy {
             CIntTy::I16 => "INT16_MAX",
             CIntTy::I32 => "INT32_MAX",
             CIntTy::I64 => "INT64_MAX",
+            CIntTy::I128 => "__RUST_I128_MAX",
         }
     }
 }
@@ -158,6 +159,7 @@ pub enum CUintTy {
     U16,
     U32,
     U64,
+    U128,
 }
 
 /// C floating point types.
@@ -186,6 +188,7 @@ impl CUintTy {
             CUintTy::U16 => "uint16_t",
             CUintTy::U32 => "uint32_t",
             CUintTy::U64 => "uint64_t",
+            CUintTy::U128 => "__rcgenc_u128",
         }
     }
 
@@ -197,6 +200,7 @@ impl CUintTy {
             CUintTy::U16 => "UINT16_MAX",
             CUintTy::U32 => "UINT32_MAX",
             CUintTy::U64 => "UINT64_MAX",
+            CUintTy::U128 => "__RUST_U128_MAX",
         }
     }
 }
@@ -229,7 +233,10 @@ impl<'mx> ModuleCtx<'mx> {
             IntTy::I16 => CTy::Int(CIntTy::I16),
             IntTy::I32 => CTy::Int(CIntTy::I32),
             IntTy::I64 => CTy::Int(CIntTy::I64),
-            IntTy::I128 => unimplemented!("i128 not supported yet"),
+            IntTy::I128 => {
+                self.module().require_int128();
+                CTy::Int(CIntTy::I128)
+            }
         }
     }
 
@@ -241,7 +248,10 @@ impl<'mx> ModuleCtx<'mx> {
             UintTy::U16 => CTy::UInt(CUintTy::U16),
             UintTy::U32 => CTy::UInt(CUintTy::U32),
             UintTy::U64 => CTy::UInt(CUintTy::U64),
-            UintTy::U128 => unimplemented!("u128 not supported yet"),
+            UintTy::U128 => {
+                self.module().require_int128();
+                CTy::UInt(CUintTy::U128)
+            }
         }
     }
 }

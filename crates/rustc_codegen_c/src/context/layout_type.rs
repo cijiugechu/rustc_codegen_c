@@ -1,6 +1,6 @@
 use rustc_abi::{BackendRepr, Float as AbiFloat, Integer, Primitive, RegKind};
-use rustc_codegen_c_ast::cunion::{CUnionDef, CUnionField};
 use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
+use rustc_codegen_c_ast::cunion::{CUnionDef, CUnionField};
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::LayoutTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
@@ -36,11 +36,12 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 (Integer::I16, true) => CTy::Int(CIntTy::I16),
                 (Integer::I32, true) => CTy::Int(CIntTy::I32),
                 (Integer::I64, true) => CTy::Int(CIntTy::I64),
+                (Integer::I128, true) => CTy::Int(CIntTy::I128),
                 (Integer::I8, false) => CTy::UInt(CUintTy::U8),
                 (Integer::I16, false) => CTy::UInt(CUintTy::U16),
                 (Integer::I32, false) => CTy::UInt(CUintTy::U32),
                 (Integer::I64, false) => CTy::UInt(CUintTy::U64),
-                (Integer::I128, _) => todo!("i128 scalar backend type is not supported yet"),
+                (Integer::I128, false) => CTy::UInt(CUintTy::U128),
             },
             Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
                 self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
@@ -401,6 +402,7 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             (RegKind::Integer, 2) => CTy::UInt(CUintTy::U16),
             (RegKind::Integer, 3..=4) => CTy::UInt(CUintTy::U32),
             (RegKind::Integer, 5..=8) => CTy::UInt(CUintTy::U64),
+            (RegKind::Integer, 9..=16) => CTy::UInt(CUintTy::U128),
             (RegKind::Float, 4) => CTy::Float(CFloatTy::F32),
             (RegKind::Float, 8) => CTy::Float(CFloatTy::F64),
             _ => panic!("unsupported ABI register for C backend: {ty:?}"),
@@ -480,11 +482,12 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 (Integer::I16, true) => CTy::Int(CIntTy::I16),
                 (Integer::I32, true) => CTy::Int(CIntTy::I32),
                 (Integer::I64, true) => CTy::Int(CIntTy::I64),
+                (Integer::I128, true) => CTy::Int(CIntTy::I128),
                 (Integer::I8, false) => CTy::UInt(CUintTy::U8),
                 (Integer::I16, false) => CTy::UInt(CUintTy::U16),
                 (Integer::I32, false) => CTy::UInt(CUintTy::U32),
                 (Integer::I64, false) => CTy::UInt(CUintTy::U64),
-                (Integer::I128, _) => todo!(),
+                (Integer::I128, false) => CTy::UInt(CUintTy::U128),
             },
             Primitive::Pointer(_) => CTy::Ref(Interned::new_unchecked(
                 self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),

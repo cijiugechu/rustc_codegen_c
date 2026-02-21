@@ -226,6 +226,8 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                     ("__builtin_popcount", CTy::UInt(CUintTy::U32))
                 } else if bits <= 64 {
                     ("__builtin_popcountll", CTy::UInt(CUintTy::U64))
+                } else if bits <= 128 {
+                    ("__rust_popcount_u128", CTy::UInt(CUintTy::U128))
                 } else {
                     panic!("unsupported ctpop width: {bits}");
                 };

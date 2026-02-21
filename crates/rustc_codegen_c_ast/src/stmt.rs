@@ -86,6 +86,20 @@ impl<'mx> ModuleCtx<'mx> {
     }
 }
 
+fn format_switch_case_literal(value: u128) -> String {
+    if value <= i64::MAX as u128 {
+        return value.to_string();
+    }
+
+    if value <= u64::MAX as u128 {
+        return format!("{value}ULL");
+    }
+
+    let hi = (value >> 64) as u64;
+    let lo = value as u64;
+    format!("__rust_u128_from_parts({hi}ULL, {lo}ULL)")
+}
+
 impl Print for CStmt<'_> {
     fn print_to(&self, ctx: &mut PrinterCtx) {
         match self {
@@ -147,7 +161,7 @@ impl Print for CStmt<'_> {
                     ctx.cbox_delim(INDENT, ("{", "}"), 1, |ctx| {
                         if let Some((first, rest)) = cases.split_first() {
                             ctx.ibox(INDENT, |ctx| {
-                                ctx.word(format!("case {}:", first.0));
+                                ctx.word(format!("case {}:", format_switch_case_literal(first.0)));
                                 ctx.nbsp();
                                 ctx.word("goto");
                                 ctx.nbsp();
@@ -157,7 +171,7 @@ impl Print for CStmt<'_> {
                             for (val, label) in rest {
                                 ctx.hardbreak();
                                 ctx.ibox(INDENT, |ctx| {
-                                    ctx.word(format!("case {val}:"));
+                                    ctx.word(format!("case {}:", format_switch_case_literal(*val)));
                                     ctx.nbsp();
                                     ctx.word("goto");
                                     ctx.nbsp();
@@ -193,4 +207,34 @@ pub(crate) fn print_compound(stmts: &[CStmt], ctx: &mut PrinterCtx) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_switch_case_literal, CStmtKind};
+    use crate::expr::CValue;
+    use crate::pretty::{Print, PrinterCtx};
+    use crate::{ModuleArena, ModuleCtx};
+
+    #[test]
+    fn switch_case_formats_large_u128_literal_with_parts() {
+        let value = (1u128 << 64) + 7;
+        assert_eq!(format_switch_case_literal(value), "__rust_u128_from_parts(1ULL, 7ULL)");
+    }
+
+    #[test]
+    fn switch_statement_prints_formatted_large_case_literal() {
+        let arena = ModuleArena::new("");
+        let mcx = ModuleCtx(&arena);
+        let stmt = mcx.stmt(CStmtKind::Switch {
+            expr: mcx.value(CValue::Local(0)),
+            cases: vec![((1u128 << 64) + 9, "bb1")],
+            default: "bb0",
+        });
+
+        let mut ctx = PrinterCtx::new();
+        stmt.print_to(&mut ctx);
+        let rendered = ctx.finish();
+        assert!(rendered.contains("case __rust_u128_from_parts(1ULL, 9ULL):"));
+    }
 }

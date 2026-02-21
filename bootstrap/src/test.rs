@@ -130,11 +130,15 @@ impl TestCommand {
     }
 
     fn run_cargo_mod_smoke(&self, manifest: &Manifest) {
-        self.log_action_start("TEST Cargo smoke", "tests/cargo/mod_smoke");
-        let mut command = std::process::Command::new("cargo");
-        command.args(["build", "--manifest-path", "tests/cargo/mod_smoke/Cargo.toml"]);
-        configure_cargo_command_env(&mut command, manifest);
-        self.command_status("cargo smoke", &mut command);
+        for smoke_manifest in
+            ["tests/cargo/mod_smoke/Cargo.toml", "tests/cargo/bitflags_smoke/Cargo.toml"]
+        {
+            self.log_action_start("TEST Cargo smoke", smoke_manifest);
+            let mut command = std::process::Command::new("cargo");
+            command.args(["build", "--manifest-path", smoke_manifest]);
+            configure_cargo_command_env(&mut command, manifest);
+            self.command_status("cargo smoke", &mut command);
+        }
     }
 
     pub fn collect_testcases(&self, manifest: &Manifest) -> Vec<TestCase> {

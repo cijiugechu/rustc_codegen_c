@@ -207,6 +207,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                     CIntTy::I16 => 16,
                     CIntTy::I32 => 32,
                     CIntTy::I64 => 64,
+                    CIntTy::I128 => 128,
                 };
                 Some((true, bits, matches!(int, CIntTy::Isize)))
             }
@@ -217,6 +218,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                     CUintTy::U16 => 16,
                     CUintTy::U32 => 32,
                     CUintTy::U64 => 64,
+                    CUintTy::U128 => 128,
                 };
                 Some((false, bits, matches!(uint, CUintTy::Usize)))
             }
@@ -432,6 +434,9 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
 
     fn atomic_storage_ty(&self, mem_ty: CTy<'mx>, intrinsic: &str) -> (CTy<'mx>, bool) {
         match mem_ty {
+            CTy::Int(CIntTy::I128) | CTy::UInt(CUintTy::U128) => self.atomic_fatal(format!(
+                "{intrinsic} does not support 128-bit atomics yet: {mem_ty:?}"
+            )),
             CTy::Bool | CTy::Int(_) | CTy::UInt(_) => (mem_ty, false),
             CTy::Ref(kind) if matches!(kind.0, CTyKind::Pointer(_)) => {
                 (self.atomic_pointer_int_ty(), true)
@@ -678,9 +683,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             match kind.0 {
                 CTyKind::Array(elem, _)
                 | CTyKind::IncompleteArray(elem)
-                | CTyKind::Pointer(elem) => {
-                    self.update_ptr_pointee_ty(ptr, *elem)
-                }
+                | CTyKind::Pointer(elem) => self.update_ptr_pointee_ty(ptr, *elem),
                 CTyKind::Function { .. } => {}
                 CTyKind::Struct(_) | CTyKind::Union(_) => {}
             }
@@ -705,6 +708,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 rustc_codegen_c_ast::ty::CIntTy::I16 => 2,
                 rustc_codegen_c_ast::ty::CIntTy::I32 => 4,
                 rustc_codegen_c_ast::ty::CIntTy::I64 => 8,
+                rustc_codegen_c_ast::ty::CIntTy::I128 => 16,
                 rustc_codegen_c_ast::ty::CIntTy::Isize => {
                     self.tcx.data_layout.pointer_size().bytes() as usize
                 }
@@ -714,6 +718,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CUintTy::U16 => 2,
                 CUintTy::U32 => 4,
                 CUintTy::U64 => 8,
+                CUintTy::U128 => 16,
                 CUintTy::Usize => self.tcx.data_layout.pointer_size().bytes() as usize,
             }),
             CTy::Ref(kind) => match kind.0 {
@@ -721,11 +726,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
                 CTyKind::IncompleteArray(_) => {
                     let msg = crate::context::validate_incomplete_array_usage(false).unwrap_err();
-                    self.cx
-                        .tcx
-                        .sess
-                        .dcx()
-                        .fatal(format!("{msg} and has no size"));
+                    self.cx.tcx.sess.dcx().fatal(format!("{msg} and has no size"));
                 }
                 CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) | CTyKind::Union(_) => {
@@ -744,7 +745,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         let fkey = self.fkey();
         let slot = self.cx.pending_allocas.borrow().get(&(fkey, ptr)).copied()?;
         let size = slot.bytes;
-        if size != 1 && size != 2 && size != 4 && size != 8 {
+        if size != 1 && size != 2 && size != 4 && size != 8 && size != 16 {
             return None;
         }
         if align.bytes() as usize != size {
@@ -756,6 +757,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             2 => CTy::UInt(CUintTy::U16),
             4 => CTy::UInt(CUintTy::U32),
             8 => CTy::UInt(CUintTy::U64),
+            16 => CTy::UInt(CUintTy::U128),
             _ => return None,
         })
     }
@@ -766,6 +768,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             2 => CTy::UInt(CUintTy::U16),
             4 => CTy::UInt(CUintTy::U32),
             8 => CTy::UInt(CUintTy::U64),
+            16 => CTy::UInt(CUintTy::U128),
             _ => CTy::UInt(CUintTy::U8),
         }
     }
@@ -1175,6 +1178,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     CUintTy::U16 => CTy::Int(CIntTy::I16),
                     CUintTy::U32 => CTy::Int(CIntTy::I32),
                     CUintTy::U64 => CTy::Int(CIntTy::I64),
+                    CUintTy::U128 => CTy::Int(CIntTy::I128),
                 };
                 let lhs = self.coerce_int_operand_expr(lhs, signed_ty);
                 let shifted = self.mcx.binary(lhs, rhs, ">>");

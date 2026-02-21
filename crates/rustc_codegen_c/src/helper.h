@@ -11,6 +11,25 @@
 #define __rust_utos(u, s, v, m) \
     ((v) <= (m) ? ((s)v) : ((s)((u)(v) - (u)(m) - 1)))
 
+#if defined(__SIZEOF_INT128__)
+typedef __int128 __rcgenc_i128;
+typedef unsigned __int128 __rcgenc_u128;
+
+#define __RUST_U128_MAX \
+    ((((unsigned __int128)0xFFFFFFFFFFFFFFFFULL) << 64) | (unsigned __int128)0xFFFFFFFFFFFFFFFFULL)
+#define __RUST_I128_MAX \
+    ((__rcgenc_i128)((((unsigned __int128)0x7FFFFFFFFFFFFFFFULL) << 64) | (unsigned __int128)0xFFFFFFFFFFFFFFFFULL))
+#define __rust_u128_from_parts(hi, lo) \
+    ((((unsigned __int128)(uint64_t)(hi)) << 64) | ((unsigned __int128)(uint64_t)(lo)))
+#define __rust_i128_from_parts(hi, lo) ((__rcgenc_i128)__rust_u128_from_parts((hi), (lo)))
+
+static inline unsigned int __rust_popcount_u128(unsigned __int128 value) {
+    uint64_t lo = (uint64_t)value;
+    uint64_t hi = (uint64_t)(value >> 64);
+    return (unsigned int)(__builtin_popcountll(lo) + __builtin_popcountll(hi));
+}
+#endif
+
 static inline void __rust_black_box_observe(const void *ptr, size_t size) {
     if (size != 0) {
         (void)*(const volatile unsigned char *)ptr;
