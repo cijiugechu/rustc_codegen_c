@@ -1501,6 +1501,37 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             .or_else(|| self.pointer_pointee_ty(ptr))
             .or_else(|| self.infer_store_ty_from_pending_alloca(ptr, align))
             .unwrap_or_else(|| self.fallback_store_ty_from_align(align));
+
+        if let CTy::Ref(kind) = store_ty {
+            if matches!(kind.0, CTyKind::Array(_, _)) {
+                let source_is_addressable = matches!(
+                    val_ty,
+                    Some(CTy::Ref(src_kind))
+                        if matches!(
+                            src_kind.0,
+                            CTyKind::Array(_, _) | CTyKind::IncompleteArray(_) | CTyKind::Pointer(_)
+                        )
+                );
+                if !source_is_addressable {
+                    panic!(
+                        "array store source must be pointer/array-typed: val={val:?}, val_ty={val_ty:?}, store_ty={store_ty:?}"
+                    );
+                }
+                let bytes = self
+                    .c_ty_size_bytes(store_ty)
+                    .unwrap_or_else(|| panic!("array store requires sized type: {store_ty:?}"));
+                self.memcpy(
+                    ptr,
+                    align,
+                    val,
+                    align,
+                    self.const_usize(bytes as u64),
+                    rustc_codegen_ssa::MemFlags::empty(),
+                );
+                return val;
+            }
+        }
+
         self.ensure_alloca_decl(ptr, Some(store_ty));
         let lhs = if let Some(lvalue) = self.pointer_lvalue(ptr) {
             match self.pointer_pointee_ty(ptr) {
