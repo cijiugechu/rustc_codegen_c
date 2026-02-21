@@ -1,11 +1,12 @@
 use rustc_abi::{Align, BackendRepr, Size};
-use rustc_codegen_c_ast::expr::CValue;
+use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CUintTy};
 use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::{
     BuilderMethods, ConstCodegenMethods, IntrinsicCallBuilderMethods, LayoutTypeCodegenMethods,
+    OverflowOp,
 };
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::Instance;
@@ -14,6 +15,36 @@ use rustc_span::sym;
 use crate::builder::Builder;
 
 impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
+    fn materialize_typed_expr(&mut self, ty: CTy<'mx>, expr: CExpr<'mx>) -> CValue<'mx> {
+        let value = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(value, ty, Some(expr))));
+        self.record_value_ty(value, ty);
+        value
+    }
+
+    fn casted_integer_literal(&mut self, ty: CTy<'mx>, literal: &'static str) -> CValue<'mx> {
+        let expr = self.mcx.cast(ty, self.mcx.raw(literal));
+        self.materialize_typed_expr(ty, expr)
+    }
+
+    fn saturating_integer_bounds(&mut self, ty: CTy<'mx>) -> (CValue<'mx>, CValue<'mx>) {
+        match ty {
+            CTy::UInt(_) => {
+                let min = self.casted_integer_literal(ty, "0");
+                let max = self.casted_integer_literal(ty, ty.max_value());
+                (min, max)
+            }
+            CTy::Int(_) => {
+                let max = self.casted_integer_literal(ty, ty.max_value());
+                let neg_max = self.mcx.unary("-", self.mcx.value(max));
+                let one = self.mcx.cast(ty, self.mcx.raw("1"));
+                let min = self.materialize_typed_expr(ty, self.mcx.binary(neg_max, one, "-"));
+                (min, max)
+            }
+            _ => panic!("saturating intrinsic expects integer backend type, got {ty:?}"),
+        }
+    }
+
     fn raw_eq_use_fast_path(&self, layout: TyAndLayout<'tcx>, pointer_size: u64) -> bool {
         match layout.backend_repr {
             BackendRepr::Scalar(_) | BackendRepr::ScalarPair(_, _) => true,
@@ -239,6 +270,49 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(res, ret_ty, Some(init))));
                 self.record_value_ty(res, ret_ty);
                 self.store(res, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
+            sym::saturating_add | sym::saturating_sub => {
+                let int_ty = fn_args.type_at(0);
+                let backend_ty = match int_ty.kind() {
+                    rustc_type_ir::TyKind::Int(int) => self.mcx.get_int_type(*int),
+                    rustc_type_ir::TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
+                    _ => self.tcx.sess.dcx().span_fatal(
+                        span,
+                        format!("{name} intrinsic expects an integer type, got {int_ty:?}"),
+                    ),
+                };
+
+                let lhs = args[0].immediate();
+                let rhs = args[1].immediate();
+                let overflow_op = match name {
+                    sym::saturating_add => OverflowOp::Add,
+                    sym::saturating_sub => OverflowOp::Sub,
+                    _ => unreachable!(),
+                };
+                let (val, has_overflow) = self.checked_binop(overflow_op, int_ty, lhs, rhs);
+                let (min, max) = self.saturating_integer_bounds(backend_ty);
+
+                let saturated = match backend_ty {
+                    CTy::UInt(_) => match name {
+                        sym::saturating_add => self.select(has_overflow, max, val),
+                        sym::saturating_sub => self.select(has_overflow, min, val),
+                        _ => unreachable!(),
+                    },
+                    CTy::Int(_) => {
+                        let zero = self.casted_integer_literal(backend_ty, "0");
+                        let rhs_ge_zero = self.icmp(IntPredicate::IntSGE, rhs, zero);
+                        let sat_on_overflow = match name {
+                            sym::saturating_add => self.select(rhs_ge_zero, max, min),
+                            sym::saturating_sub => self.select(rhs_ge_zero, min, max),
+                            _ => unreachable!(),
+                        };
+                        self.select(has_overflow, sat_on_overflow, val)
+                    }
+                    _ => unreachable!(),
+                };
+
+                self.store(saturated, llresult.val.llval, llresult.val.align);
                 Ok(())
             }
             sym::compare_bytes => {
