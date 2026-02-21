@@ -10,7 +10,9 @@ use rayon::prelude::*;
 use similar::{ChangeTag, TextDiff};
 use which::which;
 
-use crate::cargo::configure_cargo_command_env;
+use crate::cargo::{
+    configure_cargo_command_env, configure_cargo_command_env_with_extra_rustflags,
+};
 use crate::manifest::Manifest;
 use crate::Run;
 
@@ -139,6 +141,17 @@ impl TestCommand {
             configure_cargo_command_env(&mut command, manifest);
             self.command_status("cargo smoke", &mut command);
         }
+
+        let test_smoke_manifest = "tests/cargo/test_attr_smoke/Cargo.toml";
+        self.log_action_start("TEST Cargo test smoke", test_smoke_manifest);
+        let mut command = std::process::Command::new("cargo");
+        command.args(["test", "--manifest-path", test_smoke_manifest]);
+        configure_cargo_command_env_with_extra_rustflags(
+            &mut command,
+            manifest,
+            &["-Zpanic_abort_tests"],
+        );
+        self.command_status("cargo test smoke", &mut command);
     }
 
     pub fn collect_testcases(&self, manifest: &Manifest) -> Vec<TestCase> {

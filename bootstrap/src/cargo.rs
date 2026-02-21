@@ -37,6 +37,14 @@ impl Run for CargoCommand {
 }
 
 pub(crate) fn configure_cargo_command_env(command: &mut Command, manifest: &Manifest) {
+    configure_cargo_command_env_with_extra_rustflags(command, manifest, &[]);
+}
+
+pub(crate) fn configure_cargo_command_env_with_extra_rustflags(
+    command: &mut Command,
+    manifest: &Manifest,
+    extra_rustflags: &[&str],
+) {
     let encoded_rustflags = std::env::var("CARGO_ENCODED_RUSTFLAGS").ok();
     let rustflags = std::env::var("RUSTFLAGS").ok();
     let mut merged_rustflags = strip_codegen_backend_and_panic_flags(rustflags_from_vars(
@@ -44,6 +52,7 @@ pub(crate) fn configure_cargo_command_env(command: &mut Command, manifest: &Mani
         rustflags.as_deref(),
     ));
     merged_rustflags.extend(manifest.backend_rustflags());
+    merged_rustflags.extend(extra_rustflags.iter().map(|flag| (*flag).to_string()));
 
     command.env("CARGO_ENCODED_RUSTFLAGS", merged_rustflags.join("\x1f"));
 

@@ -134,7 +134,10 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         let mut signature = self.fn_abi_to_c_signature(fn_abi);
         let is_printf = self.apply_known_symbol_signature_overrides(symbol_name, &mut signature);
 
-        let (func, already_emitted) = if signature.has_struct_return() {
+        let needs_indirect_bridge =
+            signature.has_struct_return() && !self.tcx.should_codegen_locally(instance);
+
+        let (func, already_emitted) = if needs_indirect_bridge {
             (self.declare_indirect_return_bridge(symbol_name, fn_abi, &signature), true)
         } else {
             let (decl_name, link_name) = self.declaration_symbol_names(symbol_name);
