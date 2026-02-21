@@ -359,6 +359,77 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.store(saturated, llresult.val.llval, llresult.val.align);
                 Ok(())
             }
+            sym::simd_add | sym::simd_sub => {
+                let lhs_ty = fn_args.type_at(0);
+                let lhs_layout = self.layout_of(lhs_ty);
+                let ret_layout = llresult.layout;
+                if !matches!(lhs_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+                    self.tcx.sess.dcx().span_fatal(
+                        span,
+                        format!(
+                            "invalid monomorphization of `{name}` intrinsic: expected SIMD input type, found non-SIMD `{lhs_ty:?}`"
+                        ),
+                    );
+                }
+                if !matches!(ret_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+                    self.tcx.sess.dcx().span_fatal(
+                        span,
+                        format!(
+                            "invalid monomorphization of `{name}` intrinsic: expected SIMD return type, found `{}`",
+                            ret_layout.ty
+                        ),
+                    );
+                }
+                if ret_layout.ty != lhs_ty {
+                    self.tcx.sess.dcx().span_fatal(
+                        span,
+                        format!(
+                            "invalid monomorphization of `{name}` intrinsic: arg={lhs_ty:?}, ret={:?}",
+                            ret_layout.ty
+                        ),
+                    );
+                }
+
+                let (_lanes, lane_ty) = lhs_ty.simd_size_and_type(self.tcx);
+                if !matches!(
+                    lane_ty.kind(),
+                    rustc_type_ir::TyKind::Int(_) | rustc_type_ir::TyKind::Uint(_)
+                ) {
+                    self.tcx.sess.dcx().span_fatal(
+                        span,
+                        format!(
+                            "`{name}` intrinsic currently supports only Int/Uint SIMD lanes in rustc_codegen_c, got `{lane_ty}`"
+                        ),
+                    );
+                }
+
+                let vec_backend_ty = self.cx.immediate_backend_type(lhs_layout);
+                let lhs = args[0].immediate();
+                let rhs = args[1].immediate();
+                let lhs_expr = match self.value_ty(lhs) {
+                    Some(ty) if ty != vec_backend_ty => {
+                        self.mcx.cast(vec_backend_ty, self.mcx.value(lhs))
+                    }
+                    _ => self.mcx.value(lhs),
+                };
+                let rhs_expr = match self.value_ty(rhs) {
+                    Some(ty) if ty != vec_backend_ty => {
+                        self.mcx.cast(vec_backend_ty, self.mcx.value(rhs))
+                    }
+                    _ => self.mcx.value(rhs),
+                };
+                let op = match name {
+                    sym::simd_add => "+",
+                    sym::simd_sub => "-",
+                    _ => unreachable!(),
+                };
+                let out = self.materialize_typed_expr(
+                    vec_backend_ty,
+                    self.mcx.binary(lhs_expr, rhs_expr, op),
+                );
+                self.store(out, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
             sym::compare_bytes => {
                 let a_ptr = args[0].immediate();
                 let b_ptr = args[1].immediate();

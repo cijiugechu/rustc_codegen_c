@@ -212,6 +212,8 @@ impl CUintTy {
 pub enum CTyKind<'mx> {
     /// A pointer type.
     Pointer(CTy<'mx>),
+    /// A vector type with element type, lane count, and total byte width.
+    Vector { elem: CTy<'mx>, lanes: usize, bytes: usize },
     /// An array type with element type and size.
     Array(CTy<'mx>, usize),
     /// An incomplete array type (`[]`) used by declaration-only contexts.
@@ -270,6 +272,7 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
     enum DeclaratorPart<'mx> {
         Ident(CValue<'mx>),
         Ptr,
+        VectorAttr(usize),
         ArrayDim(usize),
         ArrayUnknown,
         FuncParams(Vec<CTy<'mx>>),
@@ -285,6 +288,9 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                 }
                 DeclaratorPart::Ptr => {
                     ctx.word("*");
+                }
+                DeclaratorPart::VectorAttr(bytes) => {
+                    ctx.word(format!("__attribute__((vector_size({bytes})))"));
                 }
                 DeclaratorPart::ArrayDim(dim) => {
                     ctx.word(format!("[{}]", dim));
@@ -324,6 +330,10 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
                     }
                     ty = *inner;
                 }
+                CTyKind::Vector { elem, lanes: _, bytes } => {
+                    decl_parts.push_front(DeclaratorPart::VectorAttr(*bytes));
+                    ty = *elem;
+                }
                 CTyKind::Array(inner, dim) => {
                     decl_parts.push_back(DeclaratorPart::ArrayDim(*dim));
                     ty = *inner;
@@ -347,9 +357,20 @@ pub(crate) fn print_declarator(mut ty: CTy, val: Option<CValue>, ctx: &mut Print
     if val.is_some() || !decl_parts.is_empty() {
         ctx.nbsp();
     }
-    for part in decl_parts {
+    let decl_parts_len = decl_parts.len();
+    for (idx, part) in decl_parts.into_iter().enumerate() {
         part.print_to(ctx);
+        if matches!(part, DeclaratorPart::VectorAttr(_)) && idx + 1 < decl_parts_len {
+            ctx.nbsp();
+        }
     }
+}
+
+/// Render a standalone C type declarator as text.
+pub fn render_abstract_type(ty: CTy<'_>) -> String {
+    let mut ctx = PrinterCtx::new();
+    print_declarator(ty, None, &mut ctx);
+    ctx.finish()
 }
 
 #[cfg(test)]
@@ -527,5 +548,50 @@ mod tests {
 
         print_declarator(union_ptr_ty, None, &mut ctx);
         assert_eq!(ctx.finish(), "union U *");
+    }
+
+    #[test]
+    fn test_print_declarator_vector() {
+        let mut ctx = setup_printer_ctx();
+        let vec_kind =
+            CTyKind::Vector { elem: CTy::Int(CIntTy::I32), lanes: 4, bytes: 16 };
+        let vec_ty = CTy::Ref(Interned::new_unchecked(&vec_kind));
+
+        print_declarator(vec_ty, Some(CValue::Local(5)), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t __attribute__((vector_size(16))) _5");
+    }
+
+    #[test]
+    fn test_print_declarator_pointer_to_vector() {
+        let mut ctx = setup_printer_ctx();
+        let vec_kind =
+            CTyKind::Vector { elem: CTy::Int(CIntTy::I32), lanes: 4, bytes: 16 };
+        let vec_ty = CTy::Ref(Interned::new_unchecked(&vec_kind));
+        let ptr_kind = CTyKind::Pointer(vec_ty);
+        let ptr_ty = CTy::Ref(Interned::new_unchecked(&ptr_kind));
+
+        print_declarator(ptr_ty, Some(CValue::Local(6)), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t __attribute__((vector_size(16))) *_6");
+    }
+
+    #[test]
+    fn test_print_declarator_array_of_vector() {
+        let mut ctx = setup_printer_ctx();
+        let vec_kind =
+            CTyKind::Vector { elem: CTy::Int(CIntTy::I32), lanes: 4, bytes: 16 };
+        let vec_ty = CTy::Ref(Interned::new_unchecked(&vec_kind));
+        let arr_kind = CTyKind::Array(vec_ty, 2);
+        let arr_ty = CTy::Ref(Interned::new_unchecked(&arr_kind));
+
+        print_declarator(arr_ty, Some(CValue::Local(8)), &mut ctx);
+        assert_eq!(ctx.finish(), "int32_t __attribute__((vector_size(16))) _8[2]");
+    }
+
+    #[test]
+    fn test_render_abstract_vector_type() {
+        let vec_kind =
+            CTyKind::Vector { elem: CTy::UInt(CUintTy::U32), lanes: 4, bytes: 16 };
+        let vec_ty = CTy::Ref(Interned::new_unchecked(&vec_kind));
+        assert_eq!(render_abstract_type(vec_ty), "uint32_t __attribute__((vector_size(16)))");
     }
 }

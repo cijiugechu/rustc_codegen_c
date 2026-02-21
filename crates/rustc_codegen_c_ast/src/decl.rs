@@ -115,6 +115,7 @@ fn type_contains_incomplete_array(ty: CTy<'_>) -> bool {
         CTy::Ref(kind) => match kind.0 {
             CTyKind::IncompleteArray(_) => true,
             CTyKind::Pointer(inner) => type_contains_incomplete_array(*inner),
+            CTyKind::Vector { elem, lanes: _, bytes: _ } => type_contains_incomplete_array(*elem),
             CTyKind::Array(inner, _) => type_contains_incomplete_array(*inner),
             CTyKind::Function { ret, params } => {
                 type_contains_incomplete_array(*ret)

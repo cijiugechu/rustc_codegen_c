@@ -67,6 +67,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
             CTy::Float(CFloatTy::F64) => rustc_codegen_ssa::common::TypeKind::Double,
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => rustc_codegen_ssa::common::TypeKind::Pointer,
+                CTyKind::Vector { .. } => rustc_codegen_ssa::common::TypeKind::Vector,
                 CTyKind::Array(_, _) | CTyKind::IncompleteArray(_) => {
                     rustc_codegen_ssa::common::TypeKind::Array
                 }
@@ -92,6 +93,7 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
         match ty {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(inner)
+                | CTyKind::Vector { elem: inner, lanes: _, bytes: _ }
                 | CTyKind::Array(inner, _)
                 | CTyKind::IncompleteArray(inner) => *inner,
                 CTyKind::Function { .. } => panic!("function has no scalar element type"),
@@ -104,7 +106,13 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
     }
 
     fn vector_length(&self, ty: Self::Type) -> usize {
-        todo!()
+        match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Vector { elem: _, lanes, bytes: _ } => *lanes,
+                _ => panic!("not a vector type: {ty:?}"),
+            },
+            _ => panic!("not a vector type: {ty:?}"),
+        }
     }
 
     fn float_width(&self, ty: Self::Type) -> usize {

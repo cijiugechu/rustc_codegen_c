@@ -1,8 +1,11 @@
 use rustc_abi::{Float as AbiFloat, Primitive};
 use rustc_codegen_c_ast::expr::CValue;
+use rustc_codegen_c_ast::pretty::{Print, PrinterCtx};
 use rustc_codegen_c_ast::symbol::{CLinkage, CVisibility};
-use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::traits::{ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods};
+use rustc_codegen_c_ast::ty::{render_abstract_type, CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_ssa::traits::{
+    BaseTypeCodegenMethods, ConstCodegenMethods, MiscCodegenMethods, StaticCodegenMethods,
+};
 use rustc_const_eval::interpret::{ConstAllocation, Scalar};
 use rustc_data_structures::intern::Interned;
 use rustc_middle::mir::interpret::{read_target_uint, GlobalAlloc};
@@ -39,6 +42,12 @@ fn value_expr_text(value: CValue<'_>) -> String {
         CValue::Local(i) => format!("_{i}"),
         CValue::Func(name) => name.to_string(),
     }
+}
+
+fn render_expr_text(expr: rustc_codegen_c_ast::expr::CExpr<'_>) -> String {
+    let mut ctx = PrinterCtx::new();
+    expr.print_to(&mut ctx);
+    ctx.finish()
 }
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
@@ -423,7 +432,49 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
             }
         }
     }
-    fn const_vector(&self, _: &[Self::Value]) -> Self::Value {
-        todo!()
+    fn const_vector(&self, elts: &[Self::Value]) -> Self::Value {
+        if elts.is_empty() {
+            self.tcx
+                .sess
+                .dcx()
+                .fatal("const_vector requires at least one element for SIMD lowering");
+        }
+
+        let lane_ty = self.val_ty(elts[0]);
+        for (idx, elt) in elts.iter().copied().enumerate().skip(1) {
+            let ty = self.val_ty(elt);
+            if ty != lane_ty {
+                self.tcx.sess.dcx().fatal(format!(
+                    "const_vector lane type mismatch at index {idx}: expected {lane_ty:?}, got {ty:?}"
+                ));
+            }
+        }
+
+        let Some((lane_size, _lane_align)) = self.c_ty_size_align(lane_ty) else {
+            self.tcx
+                .sess
+                .dcx()
+                .fatal(format!("const_vector lane type has no C size: {lane_ty:?}"));
+        };
+        let Some(total_bytes) = lane_size.checked_mul(elts.len()) else {
+            self.tcx.sess.dcx().fatal(format!(
+                "const_vector byte size overflow: lane_size={lane_size}, lanes={}",
+                elts.len()
+            ));
+        };
+
+        let vec_ty = self.simd_vector_ty(lane_ty, elts.len(), total_bytes);
+        let vec_ty_text = render_abstract_type(vec_ty);
+        let lanes = elts
+            .iter()
+            .map(|elt| render_expr_text(self.mcx.value(*elt)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expr = self.mcx.alloc_str(&format!("(({vec_ty_text}){{{lanes}}})"));
+        let value = CValue::Func(expr);
+        if let Some(fkey) = self.current_fkey.get() {
+            self.value_tys.borrow_mut().insert((fkey, value), vec_ty);
+        }
+        value
     }
 }

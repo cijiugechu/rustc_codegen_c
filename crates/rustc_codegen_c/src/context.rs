@@ -103,6 +103,7 @@ pub(crate) enum AbiTupleFieldKey<'mx> {
     UInt(CUintTy),
     Float(CFloatTy),
     Pointer(Box<AbiTupleFieldKey<'mx>>),
+    Vector { elem: Box<AbiTupleFieldKey<'mx>>, lanes: usize, bytes: usize },
     Array(Box<AbiTupleFieldKey<'mx>>, usize),
     IncompleteArray(Box<AbiTupleFieldKey<'mx>>),
     Function { ret: Box<AbiTupleFieldKey<'mx>>, params: Vec<AbiTupleFieldKey<'mx>> },
@@ -536,6 +537,33 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         }
     }
 
+    fn simd_lane_supported(&self, lane_ty: CTy<'mx>) -> bool {
+        matches!(lane_ty, CTy::Int(_) | CTy::UInt(_))
+    }
+
+    pub(crate) fn simd_vector_ty(&self, elem: CTy<'mx>, lanes: usize, bytes: usize) -> CTy<'mx> {
+        self.mcx.module().require_vector_ext();
+
+        let Some((elem_size, _elem_align)) = self.c_ty_size_align(elem) else {
+            self.tcx
+                .sess
+                .dcx()
+                .fatal(format!("could not determine SIMD lane size for {elem:?}"));
+        };
+        if let Err(msg) =
+            validate_simd_vector_shape(lanes, bytes, elem_size, self.simd_lane_supported(elem))
+        {
+            self.tcx
+                .sess
+                .dcx()
+                .fatal(format!("{msg}: lanes={lanes}, bytes={bytes}, elem={elem:?}"));
+        }
+
+        CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::Vector { elem, lanes, bytes }),
+        ))
+    }
+
     pub(crate) fn cast_target_to_c_abi_pieces(
         &self,
         cast: &rustc_target::callconv::CastTarget,
@@ -770,6 +798,11 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                 CTyKind::Pointer(elem) => {
                     AbiTupleFieldKey::Pointer(Box::new(self.abi_tuple_field_key(*elem)))
                 }
+                CTyKind::Vector { elem, lanes, bytes } => AbiTupleFieldKey::Vector {
+                    elem: Box::new(self.abi_tuple_field_key(*elem)),
+                    lanes: *lanes,
+                    bytes: *bytes,
+                },
                 CTyKind::Array(elem, len) => {
                     AbiTupleFieldKey::Array(Box::new(self.abi_tuple_field_key(*elem)), *len)
                 }
@@ -831,6 +864,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     let bytes = self.tcx.data_layout.pointer_size().bytes() as usize;
                     Some((bytes, bytes))
                 }
+                CTyKind::Vector { elem: _, lanes: _, bytes } => Some((*bytes, *bytes)),
                 CTyKind::Array(elem, count) => {
                     let (elem_size, elem_align) = self.c_ty_size_align(*elem)?;
                     Some((elem_size.saturating_mul(*count), elem_align))
@@ -899,6 +933,38 @@ pub(crate) fn static_extern_decl_action(
     StaticExternDeclAction::EmitExtern
 }
 
+pub(crate) fn validate_simd_vector_shape(
+    lanes: usize,
+    bytes: usize,
+    elem_size: usize,
+    lane_supported: bool,
+) -> Result<(), String> {
+    if lanes == 0 {
+        return Err("SIMD vector lane count must be greater than zero".to_string());
+    }
+    if bytes == 0 {
+        return Err("SIMD vector byte width must be greater than zero".to_string());
+    }
+    if !bytes.is_power_of_two() {
+        return Err(format!("SIMD vector byte width must be a power of two, got {bytes}"));
+    }
+    if !lane_supported {
+        return Err("SIMD lowering currently supports only Int/Uint lanes".to_string());
+    }
+    if elem_size == 0 {
+        return Err("SIMD lane type has zero size".to_string());
+    }
+    let Some(expected_bytes) = elem_size.checked_mul(lanes) else {
+        return Err(format!("SIMD vector size overflow: elem_size={elem_size}, lanes={lanes}"));
+    };
+    if expected_bytes != bytes {
+        return Err(format!(
+            "SIMD vector size mismatch: lanes={lanes}, expected {expected_bytes} bytes but layout requested {bytes} bytes"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_static_definition_transition(
     is_local_definition_candidate: bool,
     already_declared: bool,
@@ -930,7 +996,7 @@ pub(crate) fn validate_incomplete_array_usage(
 mod tests {
     use super::{
         sanitize_symbol_name, static_extern_decl_action, validate_incomplete_array_usage,
-        validate_static_definition_transition, StaticExternDeclAction,
+        validate_simd_vector_shape, validate_static_definition_transition, StaticExternDeclAction,
     };
 
     #[test]
@@ -972,6 +1038,23 @@ mod tests {
     #[test]
     fn sanitize_symbol_name_rewrites_c_keywords() {
         assert_eq!(sanitize_symbol_name("default"), "__rcgenc_default");
+    }
+
+    #[test]
+    fn simd_shape_validation_accepts_valid_shape() {
+        assert!(validate_simd_vector_shape(4, 16, 4, true).is_ok());
+    }
+
+    #[test]
+    fn simd_shape_validation_rejects_unsupported_lane() {
+        let err = validate_simd_vector_shape(4, 16, 4, false).unwrap_err();
+        assert!(err.contains("only Int/Uint lanes"));
+    }
+
+    #[test]
+    fn simd_shape_validation_rejects_non_power_of_two_bytes() {
+        let err = validate_simd_vector_shape(3, 12, 4, true).unwrap_err();
+        assert!(err.contains("power of two"));
     }
 }
 

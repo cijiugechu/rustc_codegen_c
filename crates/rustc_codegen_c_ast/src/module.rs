@@ -34,6 +34,8 @@ pub struct Module<'mx> {
     pub funcs: RefCell<Vec<CFunc<'mx>>>,
     /// Whether the emitted module uses i128/u128 lowering helpers.
     pub requires_int128: Cell<bool>,
+    /// Whether the emitted module uses compiler vector extensions for SIMD lowering.
+    pub requires_vector_ext: Cell<bool>,
 }
 
 impl<'mx> Module<'mx> {
@@ -48,6 +50,7 @@ impl<'mx> Module<'mx> {
             aggregate_order: RefCell::new(Vec::new()),
             funcs: RefCell::new(Vec::new()),
             requires_int128: Cell::new(false),
+            requires_vector_ext: Cell::new(false),
         }
     }
 
@@ -91,6 +94,11 @@ impl<'mx> Module<'mx> {
     pub fn require_int128(&self) {
         self.requires_int128.set(true);
     }
+
+    /// Mark that this module requires compiler vector extensions.
+    pub fn require_vector_ext(&self) {
+        self.requires_vector_ext.set(true);
+    }
 }
 
 impl Print for Module<'_> {
@@ -113,6 +121,18 @@ impl Print for Module<'_> {
                 ctx.hardbreak();
                 ctx.word(
                     "#error \"rustc_codegen_c requires __int128 support when lowering i128/u128\"",
+                );
+                ctx.hardbreak();
+                ctx.word("#endif");
+                ctx.hardbreak();
+                ctx.hardbreak();
+            }
+
+            if self.requires_vector_ext.get() {
+                ctx.word("#if !defined(__clang__) && !defined(__GNUC__)");
+                ctx.hardbreak();
+                ctx.word(
+                    "#error \"rustc_codegen_c requires compiler vector extensions for SIMD lowering\"",
                 );
                 ctx.hardbreak();
                 ctx.word("#endif");
@@ -154,5 +174,33 @@ impl Print for Module<'_> {
 
             ctx.hardbreak();
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Module;
+    use crate::pretty::{Print, PrinterCtx};
+
+    fn render_module(module: &Module<'_>) -> String {
+        let mut ctx = PrinterCtx::new();
+        module.print_to(&mut ctx);
+        ctx.finish()
+    }
+
+    #[test]
+    fn module_omits_vector_guard_by_default() {
+        let module = Module::new("");
+        let rendered = render_module(&module);
+        assert!(!rendered.contains("compiler vector extensions for SIMD lowering"));
+    }
+
+    #[test]
+    fn module_prints_vector_guard_when_required() {
+        let module = Module::new("");
+        module.require_vector_ext();
+        let rendered = render_module(&module);
+        assert!(rendered.contains("#if !defined(__clang__) && !defined(__GNUC__)"));
+        assert!(rendered.contains("compiler vector extensions for SIMD lowering"));
     }
 }

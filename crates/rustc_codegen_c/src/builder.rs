@@ -4,7 +4,8 @@ use std::ops::Deref;
 
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::pretty::{Print, PrinterCtx};
+use rustc_codegen_c_ast::ty::{render_abstract_type, CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::common::{AtomicRmwBinOp, IntPredicate, SynchronizationScope};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
@@ -99,6 +100,12 @@ fn validate_cmpxchg_order(
     } else {
         Err(ATOMIC_CMPXCHG_INVALID_ORDER_MSG)
     }
+}
+
+fn render_expr_text(expr: rustc_codegen_c_ast::expr::CExpr<'_>) -> String {
+    let mut ctx = PrinterCtx::new();
+    expr.print_to(&mut ctx);
+    ctx.finish()
 }
 
 impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
@@ -654,6 +661,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CTyKind::Pointer(elem)
                 | CTyKind::Array(elem, _)
                 | CTyKind::IncompleteArray(elem) => Some(*elem),
+                CTyKind::Vector { .. } => None,
                 CTyKind::Function { .. } => None,
                 CTyKind::Struct(_) | CTyKind::Union(_) => None,
             },
@@ -739,6 +747,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
                 CTyKind::Array(elem, _)
                 | CTyKind::IncompleteArray(elem)
                 | CTyKind::Pointer(elem) => self.update_ptr_pointee_ty(ptr, *elem),
+                CTyKind::Vector { .. } => {}
                 CTyKind::Function { .. } => {}
                 CTyKind::Struct(_) | CTyKind::Union(_) => {}
             }
@@ -778,6 +787,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             }),
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Pointer(_) => Some(self.tcx.data_layout.pointer_size().bytes() as usize),
+                CTyKind::Vector { elem: _, lanes: _, bytes } => Some(*bytes),
                 CTyKind::Array(elem, count) => self.c_ty_size_bytes(*elem).map(|size| size * count),
                 CTyKind::IncompleteArray(_) => {
                     let msg = crate::context::validate_incomplete_array_usage(false).unwrap_err();
@@ -1608,7 +1618,10 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     Some(CTy::Ref(src_kind))
                         if matches!(
                             src_kind.0,
-                            CTyKind::Array(_, _) | CTyKind::IncompleteArray(_) | CTyKind::Pointer(_)
+                            CTyKind::Array(_, _)
+                                | CTyKind::IncompleteArray(_)
+                                | CTyKind::Pointer(_)
+                                | CTyKind::Vector { .. }
                         )
                 );
                 if !source_is_addressable {
@@ -1744,7 +1757,8 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     match kind.0 {
                         CTyKind::Array(elem, _)
                         | CTyKind::IncompleteArray(elem)
-                        | CTyKind::Pointer(elem) => {
+                        | CTyKind::Pointer(elem)
+                        | CTyKind::Vector { elem, lanes: _, bytes: _ } => {
                             projected_ty = *elem;
                         }
                         CTyKind::Function { .. } => {
@@ -1777,7 +1791,9 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
 
             projected_ty = match projected_ty {
                 CTy::Ref(kind) => match kind.0 {
-                    CTyKind::Array(elem, _) | CTyKind::IncompleteArray(elem) => {
+                    CTyKind::Array(elem, _)
+                    | CTyKind::IncompleteArray(elem)
+                    | CTyKind::Vector { elem, lanes: _, bytes: _ } => {
                         let idx_expr = if let Some(index) = const_index {
                             self.mcx.value(CValue::Scalar(index as i128))
                         } else {
@@ -2249,11 +2265,54 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn extract_element(&mut self, vec: Self::Value, idx: Self::Value) -> Self::Value {
-        todo!()
+        let vec_ty =
+            self.value_ty(vec).unwrap_or_else(|| panic!("extract_element missing type: {vec:?}"));
+        let elem_ty = match vec_ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Vector { elem, lanes: _, bytes: _ } => *elem,
+                _ => panic!("extract_element expected vector type, got {vec_ty:?}"),
+            },
+            _ => panic!("extract_element expected vector type, got {vec_ty:?}"),
+        };
+        let idx_expr = match self.value_ty(idx) {
+            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(idx),
+            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(idx)),
+        };
+
+        let expr = self.mcx.index(self.mcx.value(vec), idx_expr);
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, elem_ty, Some(expr))));
+        self.record_value_ty(ret, elem_ty);
+        ret
     }
 
     fn vector_splat(&mut self, num_elts: usize, elt: Self::Value) -> Self::Value {
-        todo!()
+        if num_elts == 0 {
+            panic!("vector_splat requires a non-zero element count");
+        }
+
+        let elem_ty =
+            self.value_ty(elt).unwrap_or_else(|| panic!("vector_splat missing type: {elt:?}"));
+        let elem_size = self
+            .c_ty_size_bytes(elem_ty)
+            .unwrap_or_else(|| panic!("vector_splat unsupported lane type size: {elem_ty:?}"));
+        let total_bytes = elem_size
+            .checked_mul(num_elts)
+            .unwrap_or_else(|| panic!("vector_splat size overflow: {elem_size} * {num_elts}"));
+        let vec_ty = self.cx.simd_vector_ty(elem_ty, num_elts, total_bytes);
+        let vec_ty_text = render_abstract_type(vec_ty);
+        let lane_expr = render_expr_text(self.mcx.value(elt));
+        let lanes = std::iter::repeat_n(lane_expr, num_elts).collect::<Vec<_>>().join(", ");
+        let init_text = self.mcx.alloc_str(&format!("(({vec_ty_text}){{{lanes}}})"));
+
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            ret,
+            vec_ty,
+            Some(self.mcx.value(CValue::Func(init_text))),
+        )));
+        self.record_value_ty(ret, vec_ty);
+        ret
     }
 
     fn extract_value(&mut self, agg_val: Self::Value, idx: u64) -> Self::Value {
