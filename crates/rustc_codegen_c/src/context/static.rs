@@ -1,14 +1,10 @@
-use rustc_abi::{Align, BackendRepr, Size};
-use rustc_codegen_c_ast::cstruct::{CStructDef, CStructField};
+use rustc_abi::Align;
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::traits::{
-    ConstCodegenMethods, LayoutTypeCodegenMethods, MiscCodegenMethods, StaticCodegenMethods,
-};
+use rustc_codegen_ssa::traits::StaticCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_hir::def_id::DefId;
-use rustc_middle::mir::interpret::{read_target_uint, GlobalAlloc};
-use rustc_middle::ty::layout::LayoutOf;
+use rustc_middle::mir::interpret::read_target_uint;
 
 use crate::context::CodegenCx;
 
@@ -54,105 +50,78 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
         let visibility = info.visibility;
         let link_name = info.link_name;
         let thread_local = info.thread_local;
-        let ty = self.tcx.type_of(def_id).instantiate_identity();
-        let layout = self.layout_of(ty);
         let alloc = self.tcx.eval_static_initializer(def_id).unwrap_or_else(|err| {
             panic!("failed to evaluate static initializer for {def_id:?}: {err:?}")
         });
         let alloc = alloc.inner();
+        let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len());
+        let ptrs = alloc.provenance().ptrs();
 
-        match layout.backend_repr {
-            BackendRepr::ScalarPair(a, b) => {
-                let ptr_size = self.tcx.data_layout.pointer_size().bytes() as usize;
-                let endianness = self.tcx.data_layout.endian;
-                let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len());
+        let (static_ty, init) = if ptrs.is_empty() {
+            let array_len = bytes.len().max(1);
+            let static_ty = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), array_len)),
+            ));
+            let init_bytes = if bytes.is_empty() { &[0u8][..] } else { bytes };
+            (static_ty, self.mcx.alloc_str(&bytes_initializer(init_bytes)))
+        } else {
+            let ptr_size = self.tcx.data_layout.pointer_size().bytes() as usize;
+            if ptr_size == 0
+                || alloc.len() % ptr_size != 0
+                || ptrs.iter().any(|(offset, _)| (offset.bytes() as usize) % ptr_size != 0)
+            {
+                panic!(
+                    "unsupported static relocation layout for {def_id:?}: len={} ptr_size={} relocs={}",
+                    alloc.len(),
+                    ptr_size,
+                    ptrs.len()
+                );
+            }
 
-                let (_, ptr_prov) = alloc
-                    .provenance()
-                    .ptrs()
-                    .iter()
-                    .find(|(offset, _)| offset.bytes() == 0)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        panic!("expected pointer provenance at offset 0 for static {def_id:?}")
-                    });
+            let endianness = self.tcx.data_layout.endian;
+            let words = (alloc.len() / ptr_size).max(1);
+            let mut entries = Vec::with_capacity(words);
+            for idx in 0..words {
+                let byte_offset = idx * ptr_size;
+                let word =
+                    read_target_uint(endianness, &bytes[byte_offset..byte_offset + ptr_size])
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "failed to decode relocation word at offset {} for static {def_id:?}",
+                                byte_offset
+                            )
+                        });
 
-                let addend =
-                    read_target_uint(endianness, &bytes[..ptr_size]).unwrap_or_else(|_| {
-                        panic!("failed to decode pointer addend for static {def_id:?}")
-                    });
-
-                let base_ptr = match self.tcx.global_alloc(ptr_prov.alloc_id()) {
-                    GlobalAlloc::Memory(target_alloc) => self.const_data_from_alloc(target_alloc),
-                    GlobalAlloc::Function { instance, .. } => {
-                        CValue::Func(self.get_fn(instance).0.name)
+                if let Some((_, prov)) =
+                    ptrs.iter().find(|(offset, _)| (offset.bytes() as usize) == byte_offset)
+                {
+                    let base = self.global_alloc_base_value(self.tcx.global_alloc(prov.alloc_id()));
+                    let base_expr = value_expr_text(base);
+                    if word == 0 {
+                        entries.push(format!("(size_t)({base_expr})"));
+                    } else {
+                        entries.push(format!("((size_t)({base_expr}) + {word})"));
                     }
-                    GlobalAlloc::Static(target_def_id) => self.static_addr_expr(target_def_id),
-                    GlobalAlloc::VTable(ty, dyn_ty) => self.get_vtable_value(
-                        ty,
-                        dyn_ty.principal().map(|principal| {
-                            self.tcx.instantiate_bound_regions_with_erased(principal)
-                        }),
-                    ),
-                    GlobalAlloc::TypeId { .. } => CValue::Scalar(0),
-                };
-                let ptr = self.const_ptr_byte_offset(base_ptr, Size::from_bytes(addend));
-
-                let second_offset = a.size(self).align_to(b.align(self).abi).bytes() as usize;
-                let second_size = b.size(self).bytes() as usize;
-                let second_end = second_offset + second_size;
-                let len = read_target_uint(endianness, &bytes[second_offset..second_end])
-                    .unwrap_or_else(|_| {
-                        panic!("failed to decode scalar-pair metadata for {def_id:?}")
-                    });
-
-                let ptr_ty = self.scalar_pair_element_backend_type(layout, 0, true);
-                let len_ty = self.scalar_pair_element_backend_type(layout, 1, true);
-                let struct_name = self.mcx.alloc_str(&format!("__rcgenc_static_pair_{symbol}"));
-                self.mcx.module().push_struct(CStructDef {
-                    name: struct_name,
-                    fields: vec![
-                        CStructField { name: self.mcx.alloc_str("ptr"), ty: ptr_ty },
-                        CStructField { name: self.mcx.alloc_str("meta"), ty: len_ty },
-                    ],
-                });
-
-                let static_ty = CTy::Ref(Interned::new_unchecked(
-                    self.mcx.arena().alloc(CTyKind::Struct(struct_name)),
-                ));
-                let init = self.mcx.alloc_str(&format!("{{ {}, {} }}", value_expr_text(ptr), len));
-                self.mcx.module().push_decl(self.mcx.var_with_symbol_attrs(
-                    CValue::Func(symbol),
-                    static_ty,
-                    Some(self.mcx.value(CValue::Func(init))),
-                    linkage,
-                    visibility,
-                    link_name,
-                    thread_local,
-                ));
-            }
-            _ => {
-                if !alloc.provenance().ptrs().is_empty() {
-                    panic!("unsupported static with relocations: {def_id:?}");
+                } else {
+                    entries.push(word.to_string());
                 }
-
-                let bytes = alloc.inspect_with_uninit_and_ptr_outside_interpreter(0..alloc.len());
-                let array_len = bytes.len().max(1);
-                let array_ty = CTy::Ref(Interned::new_unchecked(
-                    self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::U8), array_len)),
-                ));
-                let init_bytes = if bytes.is_empty() { &[0u8][..] } else { bytes };
-                let init = self.mcx.alloc_str(&bytes_initializer(init_bytes));
-                self.mcx.module().push_decl(self.mcx.var_with_symbol_attrs(
-                    CValue::Func(symbol),
-                    array_ty,
-                    Some(self.mcx.value(CValue::Func(init))),
-                    linkage,
-                    visibility,
-                    link_name,
-                    thread_local,
-                ));
             }
-        }
+
+            let static_ty = CTy::Ref(Interned::new_unchecked(
+                self.mcx.arena().alloc(CTyKind::Array(CTy::UInt(CUintTy::Usize), words)),
+            ));
+            let init = self.mcx.alloc_str(&format!("{{ {} }}", entries.join(", ")));
+            (static_ty, init)
+        };
+
+        self.mcx.module().push_decl(self.mcx.var_with_symbol_attrs(
+            CValue::Func(symbol),
+            static_ty,
+            Some(self.mcx.value(CValue::Func(init))),
+            linkage,
+            visibility,
+            link_name,
+            thread_local,
+        ));
     }
 }

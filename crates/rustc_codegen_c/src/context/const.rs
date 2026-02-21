@@ -131,7 +131,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         CValue::Func(self.mcx.alloc_str(&symbol_name))
     }
 
-    fn global_alloc_base_value(&self, alloc: GlobalAlloc<'tcx>) -> CValue<'mx> {
+    pub(crate) fn global_alloc_base_value(&self, alloc: GlobalAlloc<'tcx>) -> CValue<'mx> {
         match alloc {
             GlobalAlloc::Memory(alloc) => self.const_data_from_alloc(alloc),
             GlobalAlloc::Function { instance, .. } => CValue::Func(self.get_fn(instance).0.name),

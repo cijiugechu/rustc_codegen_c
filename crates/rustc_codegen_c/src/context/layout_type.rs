@@ -9,20 +9,7 @@ use rustc_middle::ty::{self, Ty};
 use rustc_target::callconv::FnAbi;
 use rustc_type_ir::TyKind;
 
-use crate::context::{AdtFieldLayout, AdtLayoutInfo, CodegenCx};
-
-fn is_valid_c_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-
-    if !(first == '_' || first.is_ascii_alphabetic()) {
-        return false;
-    }
-
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
+use crate::context::{is_valid_c_identifier, AdtFieldLayout, AdtLayoutInfo, CodegenCx};
 
 impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
     fn is_fieldless_enum(&self, adt_def: rustc_middle::ty::AdtDef<'tcx>) -> bool {
@@ -90,6 +77,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             self.mcx.alloc_str(&format!("__rcgenc_struct_{}", self.next_synthetic_type_id()))
         };
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
 
         let variant = adt_def.non_enum_variant();
         let mut fields = Vec::with_capacity(variant.fields.len());
@@ -122,7 +110,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             fields: fields.clone(),
         };
 
-        self.adt_types.borrow_mut().insert(layout.ty, cty);
         self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
         self.struct_layouts.borrow_mut().insert(cty, layout_info.clone());
 
@@ -152,12 +139,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         }
 
         let size = layout.size.bytes_usize();
-        if size == 0 {
-            self.tcx
-                .sess
-                .dcx()
-                .fatal(format!("unsupported zero-sized union layout for {:?}", layout.ty));
-        }
 
         let name = if adt_def.repr().c() && args.is_empty() {
             self.mcx.alloc_str(self.tcx.item_name(adt_def.did()).as_str())
@@ -165,6 +146,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             self.mcx.alloc_str(&format!("__rcgenc_union_{}", self.next_synthetic_type_id()))
         };
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Union(name))));
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
 
         let variant = adt_def.non_enum_variant();
         let mut fields = Vec::with_capacity(variant.fields.len());
@@ -204,7 +186,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             fields: fields.clone(),
         };
 
-        self.adt_types.borrow_mut().insert(layout.ty, cty);
         self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
         self.struct_layouts.borrow_mut().insert(cty, layout_info);
         self.mcx.module().push_union(CUnionDef {
@@ -226,6 +207,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let name = self.mcx.alloc_str(&format!("__rcgenc_tuple_{}", self.next_synthetic_type_id()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
 
         let mut fields = Vec::with_capacity(fields_tys.len());
         let mut struct_fields = Vec::with_capacity(fields_tys.len());
@@ -250,7 +232,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             fields: fields.clone(),
         };
 
-        self.adt_types.borrow_mut().insert(layout.ty, cty);
         self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
         self.struct_layouts.borrow_mut().insert(cty, layout_info);
         self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
@@ -307,6 +288,7 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         let name =
             self.mcx.alloc_str(&format!("__rcgenc_closure_{}", self.next_synthetic_type_id()));
         let cty = CTy::Ref(Interned::new_unchecked(self.mcx.arena().alloc(CTyKind::Struct(name))));
+        self.adt_types.borrow_mut().insert(layout.ty, cty);
 
         let field_count = layout.fields.count();
         let mut fields = Vec::with_capacity(field_count);
@@ -336,7 +318,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             fields: fields.clone(),
         };
 
-        self.adt_types.borrow_mut().insert(layout.ty, cty);
         self.adt_layouts.borrow_mut().insert(layout.ty, layout_info.clone());
         self.struct_layouts.borrow_mut().insert(cty, layout_info);
         self.mcx.module().push_struct(CStructDef { name, fields: struct_fields });
@@ -369,7 +350,9 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             }
             TyKind::Tuple(..) => self.define_tuple_layout(layout),
             TyKind::Closure(..) => self.define_closure_layout(layout),
-            TyKind::Ref(..) | TyKind::RawPtr(..) => self.immediate_backend_type(layout),
+            TyKind::Ref(..) | TyKind::RawPtr(..) | TyKind::FnPtr(..) => {
+                self.immediate_backend_type(layout)
+            }
             _ => todo!("unsupported backend_type: {:?}", layout.ty.kind()),
         }
     }

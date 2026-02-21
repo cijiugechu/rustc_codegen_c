@@ -2,7 +2,7 @@ use rustc_codegen_ssa::traits::BaseTypeCodegenMethods;
 use rustc_data_structures::intern::Interned;
 use rustc_type_ir::{IntTy, UintTy};
 
-use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind};
+use rustc_codegen_c_ast::ty::{CFloatTy, CTy, CTyKind, CUintTy};
 
 use crate::context::CodegenCx;
 
@@ -145,6 +145,24 @@ impl<'tcx, 'mx> BaseTypeCodegenMethods for CodegenCx<'tcx, 'mx> {
         if let Some(fkey) = self.current_fkey.get() {
             if let Some(ty) = self.value_tys.borrow().get(&(fkey, v)).copied() {
                 return ty;
+            }
+
+            if let Some((a, b)) = self.packed_scalar_pairs.borrow().get(&(fkey, v)).copied() {
+                let a_ty = self.value_tys.borrow().get(&(fkey, a)).copied();
+                let b_ty = self.value_tys.borrow().get(&(fkey, b)).copied();
+                if let (Some(a_ty), Some(b_ty)) = (a_ty, b_ty) {
+                    let pair_ty = self.abi_tuple_ty(&[a_ty, b_ty]);
+                    self.value_tys.borrow_mut().insert((fkey, v), pair_ty);
+                    return pair_ty;
+                }
+            }
+
+            if self.pending_allocas.borrow().contains_key(&(fkey, v)) {
+                let u8_ptr = CTy::Ref(Interned::new_unchecked(
+                    self.mcx.arena().alloc(CTyKind::Pointer(CTy::UInt(CUintTy::U8))),
+                ));
+                self.value_tys.borrow_mut().insert((fkey, v), u8_ptr);
+                return u8_ptr;
             }
         }
 

@@ -82,8 +82,8 @@ pub(crate) struct StaticSymbolInfo<'mx> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StaticExternDeclAction {
     EmitExtern,
+    EmitLocalForward,
     Skip,
-    ConflictLocalAlreadyDeclared,
 }
 
 const STATIC_SYMBOL_CONFLICT_MSG: &str = "inconsistent static symbol materialization state";
@@ -354,12 +354,6 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
             already_defined,
         ) {
             StaticExternDeclAction::Skip => {}
-            StaticExternDeclAction::ConflictLocalAlreadyDeclared => {
-                self.tcx.sess.dcx().fatal(format!(
-                    "{STATIC_SYMBOL_CONFLICT_MSG}: static `{}` ({def_id:?})",
-                    info.decl_name
-                ));
-            }
             StaticExternDeclAction::EmitExtern => {
                 self.declared_statics.borrow_mut().insert(def_id);
                 let decl_ty = CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
@@ -373,7 +367,35 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
                     info.thread_local,
                 ));
             }
+            StaticExternDeclAction::EmitLocalForward => {
+                self.declared_statics.borrow_mut().insert(def_id);
+                let decl_ty = self.static_forward_decl_ty(def_id);
+                self.mcx.module().push_decl(self.mcx.var_with_symbol_attrs(
+                    CValue::Func(info.decl_name),
+                    decl_ty,
+                    None,
+                    info.linkage,
+                    info.visibility,
+                    info.link_name,
+                    info.thread_local,
+                ));
+            }
         }
+    }
+
+    fn static_forward_decl_ty(&self, def_id: DefId) -> CTy<'mx> {
+        let alloc = self.tcx.eval_static_initializer(def_id).unwrap_or_else(|err| {
+            panic!("failed to evaluate static initializer for {def_id:?}: {err:?}")
+        });
+        let alloc = alloc.inner();
+        let elem_ty = if alloc.provenance().ptrs().is_empty() {
+            CTy::UInt(CUintTy::U8)
+        } else {
+            CTy::UInt(CUintTy::Usize)
+        };
+        CTy::Ref(rustc_data_structures::intern::Interned::new_unchecked(
+            self.mcx.arena().alloc(CTyKind::IncompleteArray(elem_ty)),
+        ))
     }
 
     pub(crate) fn mark_static_defined(&self, def_id: DefId) {
@@ -868,11 +890,11 @@ pub(crate) fn static_extern_decl_action(
     if already_defined {
         return StaticExternDeclAction::Skip;
     }
-    if is_local_definition_candidate && already_declared {
-        return StaticExternDeclAction::ConflictLocalAlreadyDeclared;
-    }
-    if is_local_definition_candidate || already_declared {
+    if already_declared {
         return StaticExternDeclAction::Skip;
+    }
+    if is_local_definition_candidate {
+        return StaticExternDeclAction::EmitLocalForward;
     }
     StaticExternDeclAction::EmitExtern
 }
@@ -885,7 +907,7 @@ pub(crate) fn validate_static_definition_transition(
     if already_defined {
         return Err(STATIC_SYMBOL_DEFINED_TWICE_MSG);
     }
-    if already_declared {
+    if already_declared && !is_local_definition_candidate {
         return Err(STATIC_SYMBOL_EXTERN_DEFINED_MSG);
     }
     if !is_local_definition_candidate {
@@ -907,7 +929,7 @@ pub(crate) fn validate_incomplete_array_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        static_extern_decl_action, validate_incomplete_array_usage,
+        sanitize_symbol_name, static_extern_decl_action, validate_incomplete_array_usage,
         validate_static_definition_transition, StaticExternDeclAction,
     };
 
@@ -921,22 +943,22 @@ mod tests {
     }
 
     #[test]
-    fn local_definition_candidate_does_not_emit_extern() {
-        assert_eq!(static_extern_decl_action(true, false, false), StaticExternDeclAction::Skip);
+    fn local_definition_candidate_emits_forward_decl() {
+        assert_eq!(
+            static_extern_decl_action(true, false, false),
+            StaticExternDeclAction::EmitLocalForward
+        );
     }
 
     #[test]
-    fn local_definition_conflicts_with_prior_extern() {
-        assert_eq!(
-            static_extern_decl_action(true, true, false),
-            StaticExternDeclAction::ConflictLocalAlreadyDeclared
-        );
+    fn local_definition_candidate_dedups_forward_decl() {
+        assert_eq!(static_extern_decl_action(true, true, false), StaticExternDeclAction::Skip);
     }
 
     #[test]
     fn static_definition_transition_validation() {
         assert!(validate_static_definition_transition(true, false, false).is_ok());
-        assert!(validate_static_definition_transition(true, true, false).is_err());
+        assert!(validate_static_definition_transition(true, true, false).is_ok());
         assert!(validate_static_definition_transition(false, false, false).is_err());
         assert!(validate_static_definition_transition(true, false, true).is_err());
     }
@@ -946,9 +968,73 @@ mod tests {
         assert!(validate_incomplete_array_usage(true).is_ok());
         assert!(validate_incomplete_array_usage(false).is_err());
     }
+
+    #[test]
+    fn sanitize_symbol_name_rewrites_c_keywords() {
+        assert_eq!(sanitize_symbol_name("default"), "__rcgenc_default");
+    }
 }
 
-fn is_valid_c_identifier(name: &str) -> bool {
+fn is_c_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "restrict"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_Alignas"
+            | "_Alignof"
+            | "_Atomic"
+            | "_Bool"
+            | "_Complex"
+            | "_Generic"
+            | "_Imaginary"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
+            | "alignas"
+            | "alignof"
+            | "bool"
+            | "constexpr"
+            | "false"
+            | "nullptr"
+            | "static_assert"
+            | "thread_local"
+            | "true"
+    )
+}
+
+pub(crate) fn is_valid_c_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -958,7 +1044,7 @@ fn is_valid_c_identifier(name: &str) -> bool {
         return false;
     }
 
-    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric()) && !is_c_keyword(name)
 }
 
 pub(crate) fn sanitize_symbol_name(symbol_name: &str) -> String {

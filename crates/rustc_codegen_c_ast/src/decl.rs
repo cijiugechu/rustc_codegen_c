@@ -94,8 +94,8 @@ impl<'mx> ModuleCtx<'mx> {
         link_name: Option<&'mx str>,
         thread_local: bool,
     ) -> CDecl<'mx> {
-        if type_contains_incomplete_array(ty) {
-            panic!("incomplete array is declaration-only and requires extern storage class");
+        if type_contains_incomplete_array(ty) && init.is_some() {
+            panic!("incomplete array cannot have an initializer");
         }
         self.decl(CDeclKind::Var {
             name,
@@ -306,8 +306,26 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "incomplete array is declaration-only")]
-    fn rejects_non_extern_incomplete_array_declaration() {
+    fn allows_internal_incomplete_array_forward_declaration() {
+        let arena = ModuleArena::new("");
+        let mcx = ModuleCtx(&arena);
+        let ty =
+            CTy::Ref(Interned::new_unchecked(&CTyKind::IncompleteArray(CTy::Int(CIntTy::I32))));
+        let decl = mcx.var_with_symbol_attrs(
+            CValue::Func("bad"),
+            ty,
+            None,
+            CLinkage::Internal,
+            CVisibility::Default,
+            None,
+            false,
+        );
+        assert_eq!(render_decl(decl), "static int32_t bad[];");
+    }
+
+    #[test]
+    #[should_panic(expected = "incomplete array cannot have an initializer")]
+    fn rejects_incomplete_array_definition_with_initializer() {
         let arena = ModuleArena::new("");
         let mcx = ModuleCtx(&arena);
         let ty =
@@ -315,7 +333,7 @@ mod tests {
         let _ = mcx.var_with_symbol_attrs(
             CValue::Func("bad"),
             ty,
-            None,
+            Some(mcx.value(CValue::Scalar(0))),
             CLinkage::Internal,
             CVisibility::Default,
             None,

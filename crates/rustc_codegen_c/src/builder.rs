@@ -5,7 +5,7 @@ use std::ops::Deref;
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
-use rustc_codegen_ssa::common::{AtomicRmwBinOp, SynchronizationScope};
+use rustc_codegen_ssa::common::{AtomicRmwBinOp, IntPredicate, SynchronizationScope};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
     LayoutTypeCodegenMethods,
@@ -194,8 +194,25 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.cx.packed_scalar_pairs.borrow().get(&(self.fkey(), value)).copied()
     }
 
+    fn infer_packed_pair_ty(
+        &self,
+        pair: CValue<'mx>,
+        a: CValue<'mx>,
+        b: CValue<'mx>,
+    ) -> Option<CTy<'mx>> {
+        if let Some(existing) = self.value_ty(pair) {
+            return Some(existing);
+        }
+        let a_ty = self.value_ty(a)?;
+        let b_ty = self.value_ty(b)?;
+        Some(self.cx.abi_tuple_ty(&[a_ty, b_ty]))
+    }
+
     fn set_packed_pair_values(&mut self, pair: CValue<'mx>, a: CValue<'mx>, b: CValue<'mx>) {
         self.cx.packed_scalar_pairs.borrow_mut().insert((self.fkey(), pair), (a, b));
+        if let Some(pair_ty) = self.infer_packed_pair_ty(pair, a, b) {
+            self.record_value_ty(pair, pair_ty);
+        }
     }
 
     fn integer_shape(&self, ty: CTy<'mx>) -> Option<(bool, u64, bool)> {
@@ -571,13 +588,13 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         }
     }
 
-    fn call_signature_from_ty(&self, llty: CTy<'mx>) -> (CTy<'mx>, CTy<'mx>) {
+    fn call_signature_from_ty(&self, llty: CTy<'mx>) -> (CTy<'mx>, Vec<CTy<'mx>>, CTy<'mx>) {
         match llty {
             CTy::Ref(kind) => match kind.0 {
-                CTyKind::Function { ret, .. } => (*ret, self.pointer_to(llty)),
+                CTyKind::Function { ret, params } => (*ret, params.clone(), self.pointer_to(llty)),
                 CTyKind::Pointer(pointee) => match *pointee {
                     CTy::Ref(inner) => match inner.0 {
-                        CTyKind::Function { ret, .. } => (*ret, llty),
+                        CTyKind::Function { ret, params } => (*ret, params.clone(), llty),
                         _ => panic!("call expects function type, got pointer to {inner:?}"),
                     },
                     _ => panic!("call expects pointer-to-function type, got {llty:?}"),
@@ -586,6 +603,44 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             },
             _ => panic!("call expects function type, got {llty:?}"),
         }
+    }
+
+    fn coerce_call_arg_expr(
+        &self,
+        value: CValue<'mx>,
+        target_ty: CTy<'mx>,
+    ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        let expr = self.mcx.value(value);
+        let needs_cast = match self.value_ty(value) {
+            Some(value_ty) => value_ty != target_ty,
+            None => true,
+        };
+
+        if !needs_cast {
+            return expr;
+        }
+
+        match target_ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Struct(_) | CTyKind::Union(_) => expr,
+                _ => self.mcx.cast(target_ty, expr),
+            },
+            _ => self.mcx.cast(target_ty, expr),
+        }
+    }
+
+    fn coerce_call_args_to_param_tys(
+        &self,
+        args: &[CValue<'mx>],
+        param_tys: &[CTy<'mx>],
+    ) -> Vec<rustc_codegen_c_ast::expr::CExpr<'mx>> {
+        args.iter()
+            .enumerate()
+            .map(|(idx, value)| match param_tys.get(idx).copied() {
+                Some(target_ty) => self.coerce_call_arg_expr(*value, target_ty),
+                None => self.mcx.value(*value),
+            })
+            .collect()
     }
 
     fn pointer_pointee_ty(&self, ptr: CValue<'mx>) -> Option<CTy<'mx>> {
@@ -1250,7 +1305,17 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn neg(&mut self, v: Self::Value) -> Self::Value {
-        todo!()
+        let ty = match self.value_ty(v) {
+            Some(ty @ (CTy::Int(_) | CTy::UInt(_))) => ty,
+            Some(other) => panic!("unsupported type for neg: {other:?}"),
+            None => panic!("cannot infer operand type for neg"),
+        };
+        let ret = self.bb.func.0.next_local_var();
+        let operand = self.coerce_int_operand_expr(v, ty);
+        let expr = self.mcx.unary("-", operand);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, ty, Some(expr))));
+        self.record_value_ty(ret, ty);
+        ret
     }
 
     fn fneg(&mut self, v: Self::Value) -> Self::Value {
@@ -1472,7 +1537,41 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         count: u64,
         dest: rustc_codegen_ssa::mir::place::PlaceRef<'tcx, Self::Value>,
     ) {
-        todo!()
+        if count == 0 {
+            return;
+        }
+
+        let idx_ty = CTy::UInt(CUintTy::Usize);
+        let idx = self.bb.func.0.next_local_var();
+        let zero = self.const_usize(0);
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            idx,
+            idx_ty,
+            Some(self.mcx.value(zero)),
+        )));
+        self.record_value_ty(idx, idx_ty);
+
+        let count = self.const_usize(count);
+        let header_bb = self.append_sibling_block("repeat_loop_header");
+        let body_bb = self.append_sibling_block("repeat_loop_body");
+        let next_bb = self.append_sibling_block("repeat_loop_next");
+
+        self.br(header_bb);
+
+        self.switch_to_block(header_bb);
+        let keep_going = self.icmp(IntPredicate::IntULT, idx, count);
+        self.cond_br(keep_going, body_bb, next_bb);
+
+        self.switch_to_block(body_bb);
+        let dest_elem = dest.project_index(self, idx);
+        elem.val.store(self, dest_elem);
+
+        let next_idx = self.unchecked_uadd(idx, self.const_usize(1));
+        let assign = self.mcx.binary(self.mcx.value(idx), self.mcx.value(next_idx), "=");
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(assign));
+        self.br(header_bb);
+
+        self.switch_to_block(next_bb);
     }
 
     fn range_metadata(&mut self, load: Self::Value, range: rustc_abi::WrappingRange) {
@@ -2104,7 +2203,28 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             (Some(a), Some(b)) if a == b => a,
             (Some(a), None) => a,
             (None, Some(b)) => b,
-            (Some(a), Some(b)) => panic!("select value type mismatch: {a:?} vs {b:?}"),
+            (Some(a), Some(b)) => {
+                if let Some(compatible) = self.compatible_integer_result_ty(a, b) {
+                    compatible
+                } else {
+                    match (self.integer_shape(a), self.integer_shape(b)) {
+                        (Some((a_signed, a_bits, _)), Some((b_signed, b_bits, _)))
+                            if a_bits == b_bits =>
+                        {
+                            // For ternary lowering, differing integer signedness with identical width
+                            // is representationally compatible; prefer an unsigned carrier.
+                            if !a_signed {
+                                a
+                            } else if !b_signed {
+                                b
+                            } else {
+                                a
+                            }
+                        }
+                        _ => panic!("select value type mismatch: {a:?} vs {b:?}"),
+                    }
+                }
+            }
             (None, None) => panic!("cannot infer select result type"),
         };
 
@@ -2476,17 +2596,20 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 self.ensure_alloca_byte_array_decl(value);
             }
 
-            let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
+            let signature = self.cx.fn_abi_to_c_signature(fn_abi);
+            let mut call_args = args.to_vec();
             let mut callee = llfn;
             if instance
                 .and_then(|inst| self.tcx.lang_items().from_def_id(inst.def_id()))
                 .is_some_and(|item| item == LangItem::PanicBoundsCheck)
             {
                 callee = CValue::Func("__rust_panic_bounds_check");
-                if args.len() > 2 {
-                    args.truncate(2);
+                if call_args.len() > 2 {
+                    call_args.truncate(2);
                 }
             }
+            let param_tys = signature.param_tys();
+            let args = self.coerce_call_args_to_param_tys(&call_args, &param_tys);
 
             let expected_callee_ty = self.cx.fn_ptr_backend_type(fn_abi);
             let callee_expr = match callee {
@@ -2533,37 +2656,34 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                     ret
                 }
                 PassMode::Cast { ref cast, pad_i32: _ } => {
-                    let field_tys = self
-                        .cx
-                        .cast_target_to_c_abi_pieces(cast)
-                        .into_iter()
-                        .map(|(_, ty)| ty)
-                        .collect::<Vec<_>>();
-                    let tuple_ty = self.cx.abi_tuple_ty(&field_tys);
+                    // Keep call-site materialization consistent with signature lowering:
+                    // single-piece CastTarget returns are scalars, multi-piece are ABI tuples.
+                    let ret_ty = self.cx.cast_backend_type(cast);
                     let ret = self.bb.func.0.next_local_var();
                     self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
                         ret,
-                        tuple_ty,
+                        ret_ty,
                         Some(call),
                     )));
-                    self.record_value_ty(ret, tuple_ty);
+                    self.record_value_ty(ret, ret_ty);
                     ret
                 }
             };
         }
 
-        let (ret_ty, expected_callee_ty) = self.call_signature_from_ty(llty);
-        let mut args = args.iter().map(|v| self.mcx.value(*v)).collect::<Vec<_>>();
+        let (ret_ty, param_tys, expected_callee_ty) = self.call_signature_from_ty(llty);
+        let mut call_args = args.to_vec();
         let mut callee = llfn;
         if instance
             .and_then(|inst| self.tcx.lang_items().from_def_id(inst.def_id()))
             .is_some_and(|item| item == LangItem::PanicBoundsCheck)
         {
             callee = CValue::Func("__rust_panic_bounds_check");
-            if args.len() > 2 {
-                args.truncate(2);
+            if call_args.len() > 2 {
+                call_args.truncate(2);
             }
         }
+        let args = self.coerce_call_args_to_param_tys(&call_args, &param_tys);
 
         let callee_expr = match callee {
             CValue::Func(_) => self.mcx.value(callee),

@@ -1,6 +1,6 @@
 use rustc_abi::{Align, BackendRepr, Size};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
-use rustc_codegen_c_ast::ty::{CIntTy, CTy, CUintTy};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CUintTy};
 use rustc_codegen_ssa::common::IntPredicate;
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
@@ -43,6 +43,44 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
             }
             _ => panic!("saturating intrinsic expects integer backend type, got {ty:?}"),
         }
+    }
+
+    fn unary_float_intrinsic_spec(
+        &self,
+        name: rustc_span::Symbol,
+    ) -> Option<(&'static str, CFloatTy)> {
+        Some(match name {
+            sym::fabsf32 => ("__builtin_fabsf", CFloatTy::F32),
+            sym::fabsf64 => ("__builtin_fabs", CFloatTy::F64),
+            sym::sqrtf32 => ("__builtin_sqrtf", CFloatTy::F32),
+            sym::sqrtf64 => ("__builtin_sqrt", CFloatTy::F64),
+            sym::floorf32 => ("__builtin_floorf", CFloatTy::F32),
+            sym::floorf64 => ("__builtin_floor", CFloatTy::F64),
+            sym::ceilf32 => ("__builtin_ceilf", CFloatTy::F32),
+            sym::ceilf64 => ("__builtin_ceil", CFloatTy::F64),
+            sym::truncf32 => ("__builtin_truncf", CFloatTy::F32),
+            sym::truncf64 => ("__builtin_trunc", CFloatTy::F64),
+            sym::round_ties_even_f32 => ("__builtin_rintf", CFloatTy::F32),
+            sym::round_ties_even_f64 => ("__builtin_rint", CFloatTy::F64),
+            _ => return None,
+        })
+    }
+
+    fn codegen_unary_float_intrinsic(
+        &mut self,
+        builtin_name: &'static str,
+        ret_float_ty: CFloatTy,
+        arg: CValue<'mx>,
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+    ) {
+        let ret_ty = CTy::Float(ret_float_ty);
+        let arg_expr = match self.value_ty(arg) {
+            Some(arg_ty) if arg_ty != ret_ty => self.mcx.cast(ret_ty, self.mcx.value(arg)),
+            _ => self.mcx.value(arg),
+        };
+        let call = self.mcx.call(self.mcx.raw(builtin_name), vec![arg_expr]);
+        let out = self.materialize_typed_expr(ret_ty, call);
+        self.store(out, llresult.val.llval, llresult.val.align);
     }
 
     fn raw_eq_use_fast_path(&self, layout: TyAndLayout<'tcx>, pointer_size: u64) -> bool {
@@ -244,6 +282,12 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                     vec![ptr, self.mcx.value(size)],
                 );
                 self.bb.func.0.push_stmt(self.mcx.expr_stmt(observe));
+                Ok(())
+            }
+            name if self.unary_float_intrinsic_spec(name).is_some() => {
+                let (builtin_name, expected_float_ty) = self.unary_float_intrinsic_spec(name).unwrap();
+                let arg = args[0].immediate();
+                self.codegen_unary_float_intrinsic(builtin_name, expected_float_ty, arg, llresult);
                 Ok(())
             }
             sym::ctpop => {
