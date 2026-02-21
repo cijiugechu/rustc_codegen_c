@@ -1,0 +1,2 @@
+rustc_codegen_c fs fixture
+line_2=42
