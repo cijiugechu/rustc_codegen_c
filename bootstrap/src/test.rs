@@ -132,26 +132,105 @@ impl TestCommand {
     }
 
     fn run_cargo_mod_smoke(&self, manifest: &Manifest) {
-        for smoke_manifest in
-            ["tests/cargo/mod_smoke/Cargo.toml", "tests/cargo/bitflags_smoke/Cargo.toml"]
-        {
-            self.log_action_start("TEST Cargo smoke", smoke_manifest);
+        for smoke_manifest in self.discover_cargo_smoke_manifests() {
+            let smoke_manifest_display = smoke_manifest.display().to_string();
+            self.log_action_start("TEST Cargo smoke", &smoke_manifest_display);
             let mut command = std::process::Command::new("cargo");
-            command.args(["build", "--manifest-path", smoke_manifest]);
+            command.args(["build", "--manifest-path"]);
+            command.arg(&smoke_manifest);
             configure_cargo_command_env(&mut command, manifest);
             self.command_status("cargo smoke", &mut command);
+
+            if self.smoke_project_has_tests(&smoke_manifest) {
+                self.log_action_start("TEST Cargo test smoke", &smoke_manifest_display);
+                let mut command = std::process::Command::new("cargo");
+                command.args(["test", "--manifest-path"]);
+                command.arg(&smoke_manifest);
+                configure_cargo_command_env_with_extra_rustflags(
+                    &mut command,
+                    manifest,
+                    &["-Zpanic_abort_tests"],
+                );
+                self.command_status("cargo test smoke", &mut command);
+            }
+        }
+    }
+
+    fn discover_cargo_smoke_manifests(&self) -> Vec<PathBuf> {
+        let smoke_root = Path::new("tests/cargo");
+        let mut manifests = Vec::new();
+        let entries = std::fs::read_dir(smoke_root).unwrap_or_else(|err| {
+            panic!("failed to read cargo smoke root {}: {err}", smoke_root.display())
+        });
+
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|err| {
+                panic!("failed to read cargo smoke entry in {}: {err}", smoke_root.display())
+            });
+            let path = entry.path();
+            let ty = entry.file_type().unwrap_or_else(|err| {
+                panic!("failed to read file type for cargo smoke entry {}: {err}", path.display())
+            });
+            if !ty.is_dir() {
+                continue;
+            }
+            if path.file_name().is_some_and(|name| name == "vendor") {
+                continue;
+            }
+
+            let manifest = path.join("Cargo.toml");
+            if manifest.is_file() {
+                manifests.push(manifest);
+            }
         }
 
-        let test_smoke_manifest = "tests/cargo/test_attr_smoke/Cargo.toml";
-        self.log_action_start("TEST Cargo test smoke", test_smoke_manifest);
-        let mut command = std::process::Command::new("cargo");
-        command.args(["test", "--manifest-path", test_smoke_manifest]);
-        configure_cargo_command_env_with_extra_rustflags(
-            &mut command,
-            manifest,
-            &["-Zpanic_abort_tests"],
-        );
-        self.command_status("cargo test smoke", &mut command);
+        manifests.sort();
+        manifests
+    }
+
+    fn smoke_project_has_tests(&self, manifest_path: &Path) -> bool {
+        let Some(project_root) = manifest_path.parent() else {
+            return false;
+        };
+        self.dir_contains_test_attr(&project_root.join("src"))
+            || self.dir_contains_test_attr(&project_root.join("tests"))
+    }
+
+    fn dir_contains_test_attr(&self, dir: &Path) -> bool {
+        if !dir.is_dir() {
+            return false;
+        }
+        let entries = std::fs::read_dir(dir).unwrap_or_else(|err| {
+            panic!("failed to read source directory {}: {err}", dir.display())
+        });
+
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|err| {
+                panic!("failed to read source entry in {}: {err}", dir.display())
+            });
+            let path = entry.path();
+            let ty = entry.file_type().unwrap_or_else(|err| {
+                panic!("failed to read file type for source entry {}: {err}", path.display())
+            });
+
+            if ty.is_dir() {
+                if self.dir_contains_test_attr(&path) {
+                    return true;
+                }
+                continue;
+            }
+
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let source = std::fs::read_to_string(&path).unwrap_or_else(|err| {
+                    panic!("failed to read source file {}: {err}", path.display())
+                });
+                if source.contains("#[test]") {
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     pub fn collect_testcases(&self, manifest: &Manifest) -> Vec<TestCase> {
