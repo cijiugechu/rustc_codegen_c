@@ -145,6 +145,9 @@ impl Print for CDecl<'_> {
                     } else if *linkage == CLinkage::Internal {
                         ctx.word("static ");
                     }
+                    if *linkage == CLinkage::Weak {
+                        ctx.word("__attribute__((weak)) ");
+                    }
                     if *thread_local {
                         ctx.word("_Thread_local ");
                     }
@@ -289,6 +292,22 @@ mod tests {
                 assert_eq!(*storage_class, CStorageClass::None);
             }
         }
+    }
+
+    #[test]
+    fn prints_weak_var_without_static_storage() {
+        let arena = ModuleArena::new("");
+        let mcx = ModuleCtx(&arena);
+        let decl = mcx.var_with_symbol_attrs(
+            CValue::Func("weak_sym"),
+            CTy::UInt(CUintTy::U8),
+            None,
+            CLinkage::Weak,
+            CVisibility::Default,
+            None,
+            false,
+        );
+        assert_eq!(render_decl(decl), "__attribute__((weak)) uint8_t weak_sym;");
     }
 
     #[test]

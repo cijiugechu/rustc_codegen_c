@@ -2,6 +2,7 @@ use std::cell::RefCell;
 
 use rustc_codegen_c_ast::expr::CValue;
 use rustc_codegen_c_ast::func::{CFunc, CFuncKind};
+use rustc_codegen_c_ast::symbol::CLinkage;
 use rustc_codegen_c_ast::ty::{CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::traits::MiscCodegenMethods;
 use rustc_data_structures::intern::Interned;
@@ -40,11 +41,13 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         name: &str,
         link_name: Option<String>,
         signature: &CAbiSignature<'mx>,
+        linkage: CLinkage,
     ) -> CFunc<'mx> {
         let params = signature.param_tys();
         Interned::new_unchecked(
             self.mcx.func(
                 CFuncKind::new(self.mcx.alloc_str(name), signature.ret, params)
+                    .with_linkage(linkage)
                     .with_link_name(link_name.as_deref().map(|name| self.mcx.alloc_str(name))),
             ),
         )
@@ -62,13 +65,22 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
 
         let native_decl_name =
             format!("__rcgenc_native_{}_{}", decl_name, self.next_synthetic_type_id());
-        let native_func =
-            self.declare_c_func_with_signature(&native_decl_name, link_name, &native_signature);
+        let native_func = self.declare_c_func_with_signature(
+            &native_decl_name,
+            link_name,
+            &native_signature,
+            CLinkage::External,
+        );
         self.mcx.module().push_func(native_func);
 
         let bridge_name =
             format!("__rcgenc_sret_bridge_{}_{}", decl_name, self.next_synthetic_type_id());
-        let bridge_func = self.declare_c_func_with_signature(&bridge_name, None, lowered_signature);
+        let bridge_func = self.declare_c_func_with_signature(
+            &bridge_name,
+            None,
+            lowered_signature,
+            CLinkage::External,
+        );
 
         let call_args = lowered_signature
             .params
@@ -126,7 +138,16 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             (self.declare_indirect_return_bridge(symbol_name, fn_abi, &signature), true)
         } else {
             let (decl_name, link_name) = self.declaration_symbol_names(symbol_name);
-            (self.declare_c_func_with_signature(&decl_name, link_name, &signature), false)
+            let linkage = if is_always_false_intrinsic(symbol_name) {
+                // This synthesized intrinsic can be instantiated in multiple CGUs.
+                CLinkage::Weak
+            } else {
+                CLinkage::External
+            };
+            (
+                self.declare_c_func_with_signature(&decl_name, link_name, &signature, linkage),
+                false,
+            )
         };
 
         if is_always_false_intrinsic(symbol_name) {
@@ -164,9 +185,14 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
             } else {
                 let symbol_name = self.tcx.symbol_name(instance).name;
                 let (symbol_name, link_name) = self.declaration_symbol_names(symbol_name);
-                let func =
+                let mut func_kind =
                     CFuncKind::new(self.mcx.alloc_str(&symbol_name), CTy::Int(CIntTy::I32), [])
                         .with_link_name(link_name.as_ref().map(|name| self.mcx.alloc_str(name)));
+                if symbol_name == "rust_eh_personality" {
+                    // Avoid duplicate global `_rust_eh_personality` definitions across CGUs.
+                    func_kind = func_kind.with_linkage(CLinkage::Weak);
+                }
+                let func = func_kind;
                 let func = Interned::new_unchecked(self.mcx.func(func));
                 if is_always_false_intrinsic(symbol_name.as_str()) {
                     func.0.push_stmt(self.mcx.ret(Some(self.mcx.value(CValue::Scalar(0)))));
@@ -176,11 +202,8 @@ impl<'tcx, 'mx> MiscCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
                 func
             }
         } else {
-            let func = CFuncKind::new(
-                self.mcx.alloc_str("rust_eh_personality"),
-                CTy::Int(CIntTy::I32),
-                [],
-            );
+            let func = CFuncKind::new(self.mcx.alloc_str("rust_eh_personality"), CTy::Int(CIntTy::I32), [])
+                .with_linkage(CLinkage::Weak);
             let func = Interned::new_unchecked(self.mcx.func(func));
             self.mcx.module().push_func(func);
             func

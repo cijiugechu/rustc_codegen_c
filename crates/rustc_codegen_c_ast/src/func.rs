@@ -156,6 +156,8 @@ fn print_signature(func: CFunc, ctx: &mut PrinterCtx, with_link_name: bool) {
     ctx.ibox(0, |ctx| {
         if func.0.linkage == CLinkage::Internal {
             ctx.word("static ");
+        } else if func.0.linkage == CLinkage::Weak {
+            ctx.word("__attribute__((weak)) ");
         }
         if func.0.visibility == CVisibility::Hidden {
             ctx.word("__attribute__((visibility(\"hidden\"))) ");

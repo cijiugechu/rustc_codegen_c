@@ -5,6 +5,8 @@
 pub enum CLinkage {
     /// Externally visible linkage.
     External,
+    /// Externally visible weak linkage (`__attribute__((weak))`).
+    Weak,
     /// Translation-unit local linkage (`static`).
     Internal,
 }
