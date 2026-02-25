@@ -3,9 +3,8 @@
 use std::ops::Deref;
 
 use rustc_abi::{BackendRepr, HasDataLayout, TargetDataLayout};
-use rustc_codegen_c_ast::expr::CValue;
-use rustc_codegen_c_ast::pretty::{Print, PrinterCtx};
-use rustc_codegen_c_ast::ty::{render_abstract_type, CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
+use rustc_codegen_c_ast::expr::{CExpr, CValue};
+use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CTyKind, CUintTy};
 use rustc_codegen_ssa::common::{AtomicRmwBinOp, IntPredicate, SynchronizationScope};
 use rustc_codegen_ssa::traits::{
     BackendTypes, BaseTypeCodegenMethods, BuilderMethods, ConstCodegenMethods,
@@ -100,12 +99,6 @@ fn validate_cmpxchg_order(
     } else {
         Err(ATOMIC_CMPXCHG_INVALID_ORDER_MSG)
     }
-}
-
-fn render_expr_text(expr: rustc_codegen_c_ast::expr::CExpr<'_>) -> String {
-    let mut ctx = PrinterCtx::new();
-    expr.print_to(&mut ctx);
-    ctx.finish()
 }
 
 impl<'a, 'tcx, 'mx> Deref for Builder<'a, 'tcx, 'mx> {
@@ -330,6 +323,65 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
             CValue::RealLiteral(_) => Some(CTy::Float(CFloatTy::F64)),
             _ => None,
         }
+    }
+
+    fn require_simd_vector_ty(&self, ty: CTy<'mx>, op: &str) -> (CTy<'mx>, usize) {
+        match ty {
+            CTy::Ref(kind) => match kind.0 {
+                CTyKind::Vector { elem, lanes, bytes: _ } => (*elem, *lanes),
+                _ => panic!("{op} expects vector type, got {ty:?}"),
+            },
+            _ => panic!("{op} expects vector type, got {ty:?}"),
+        }
+    }
+
+    fn require_simd_vector_value_ty(
+        &self,
+        value: CValue<'mx>,
+        op: &str,
+    ) -> (CTy<'mx>, CTy<'mx>, usize) {
+        let vec_ty = self
+            .value_ty(value)
+            .unwrap_or_else(|| panic!("{op} missing vector value type: {value:?}"));
+        let (lane_ty, lanes) = self.require_simd_vector_ty(vec_ty, op);
+        (vec_ty, lane_ty, lanes)
+    }
+
+    fn simd_lane_index_expr(&self, idx: CValue<'mx>) -> CExpr<'mx> {
+        match self.value_ty(idx) {
+            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(idx),
+            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(idx)),
+        }
+    }
+
+    fn simd_lane_read_dyn(&mut self, vec: CValue<'mx>, idx: CValue<'mx>, op: &str) -> CValue<'mx> {
+        let (_vec_ty, lane_ty, _lanes) = self.require_simd_vector_value_ty(vec, op);
+        let lane_expr = self.mcx.index(self.mcx.value(vec), self.simd_lane_index_expr(idx));
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, lane_ty, Some(lane_expr))));
+        self.record_value_ty(ret, lane_ty);
+        ret
+    }
+
+    fn simd_lane_write_dyn(
+        &mut self,
+        vec: CValue<'mx>,
+        idx: CValue<'mx>,
+        lane: CValue<'mx>,
+        op: &str,
+    ) {
+        if !matches!(vec, CValue::Local(_)) {
+            panic!("{op} requires a writable local vector value, got {vec:?}");
+        }
+
+        let (_vec_ty, lane_ty, _lanes) = self.require_simd_vector_value_ty(vec, op);
+        let lane_expr = match self.value_ty(lane).or_else(|| self.infer_literal_value_ty(lane)) {
+            Some(ty) if ty == lane_ty => self.mcx.value(lane),
+            _ => self.mcx.cast(lane_ty, self.mcx.value(lane)),
+        };
+        let lhs = self.mcx.index(self.mcx.value(vec), self.simd_lane_index_expr(idx));
+        let assign = self.mcx.binary(lhs, lane_expr, "=");
+        self.bb.func.0.push_stmt(self.mcx.expr_stmt(assign));
     }
 
     fn infer_unchecked_integer_binop_ty(
@@ -2280,25 +2332,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn extract_element(&mut self, vec: Self::Value, idx: Self::Value) -> Self::Value {
-        let vec_ty =
-            self.value_ty(vec).unwrap_or_else(|| panic!("extract_element missing type: {vec:?}"));
-        let elem_ty = match vec_ty {
-            CTy::Ref(kind) => match kind.0 {
-                CTyKind::Vector { elem, lanes: _, bytes: _ } => *elem,
-                _ => panic!("extract_element expected vector type, got {vec_ty:?}"),
-            },
-            _ => panic!("extract_element expected vector type, got {vec_ty:?}"),
-        };
-        let idx_expr = match self.value_ty(idx) {
-            Some(CTy::UInt(CUintTy::Usize)) => self.mcx.value(idx),
-            _ => self.mcx.cast(CTy::UInt(CUintTy::Usize), self.mcx.value(idx)),
-        };
-
-        let expr = self.mcx.index(self.mcx.value(vec), idx_expr);
-        let ret = self.bb.func.0.next_local_var();
-        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, elem_ty, Some(expr))));
-        self.record_value_ty(ret, elem_ty);
-        ret
+        self.simd_lane_read_dyn(vec, idx, "extract_element")
     }
 
     fn vector_splat(&mut self, num_elts: usize, elt: Self::Value) -> Self::Value {
@@ -2306,8 +2340,10 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             panic!("vector_splat requires a non-zero element count");
         }
 
-        let elem_ty =
-            self.value_ty(elt).unwrap_or_else(|| panic!("vector_splat missing type: {elt:?}"));
+        let elem_ty = self
+            .value_ty(elt)
+            .or_else(|| self.infer_literal_value_ty(elt))
+            .unwrap_or_else(|| panic!("vector_splat missing lane type: {elt:?}"));
         let elem_size = self
             .c_ty_size_bytes(elem_ty)
             .unwrap_or_else(|| panic!("vector_splat unsupported lane type size: {elem_ty:?}"));
@@ -2315,18 +2351,16 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
             .checked_mul(num_elts)
             .unwrap_or_else(|| panic!("vector_splat size overflow: {elem_size} * {num_elts}"));
         let vec_ty = self.cx.simd_vector_ty(elem_ty, num_elts, total_bytes);
-        let vec_ty_text = render_abstract_type(vec_ty);
-        let lane_expr = render_expr_text(self.mcx.value(elt));
-        let lanes = std::iter::repeat_n(lane_expr, num_elts).collect::<Vec<_>>().join(", ");
-        let init_text = self.mcx.alloc_str(&format!("(({vec_ty_text}){{{lanes}}})"));
 
         let ret = self.bb.func.0.next_local_var();
-        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
-            ret,
-            vec_ty,
-            Some(self.mcx.value(CValue::Func(init_text))),
-        )));
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, vec_ty, None)));
         self.record_value_ty(ret, vec_ty);
+
+        for lane_idx in 0..num_elts {
+            let idx = self.const_usize(lane_idx as u64);
+            self.simd_lane_write_dyn(ret, idx, elt, "vector_splat");
+        }
+
         ret
     }
 
