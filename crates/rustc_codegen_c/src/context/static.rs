@@ -83,14 +83,16 @@ impl<'tcx, 'mx> StaticCodegenMethods for CodegenCx<'tcx, 'mx> {
             let mut entries = Vec::with_capacity(words);
             for idx in 0..words {
                 let byte_offset = idx * ptr_size;
-                let word =
-                    read_target_uint(endianness, &bytes[byte_offset..byte_offset + ptr_size])
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "failed to decode relocation word at offset {} for static {def_id:?}",
-                                byte_offset
-                            )
-                        });
+                let word = read_target_uint(
+                    endianness,
+                    &bytes[byte_offset..byte_offset + ptr_size],
+                )
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "failed to decode relocation word at offset {} for static {def_id:?}",
+                        byte_offset
+                    )
+                });
 
                 if let Some((_, prov)) =
                     ptrs.iter().find(|(offset, _)| (offset.bytes() as usize) == byte_offset)

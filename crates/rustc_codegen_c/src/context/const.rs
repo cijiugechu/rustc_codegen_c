@@ -451,10 +451,7 @@ impl<'tcx, 'mx> ConstCodegenMethods for CodegenCx<'tcx, 'mx> {
         }
 
         let Some((lane_size, _lane_align)) = self.c_ty_size_align(lane_ty) else {
-            self.tcx
-                .sess
-                .dcx()
-                .fatal(format!("const_vector lane type has no C size: {lane_ty:?}"));
+            self.tcx.sess.dcx().fatal(format!("const_vector lane type has no C size: {lane_ty:?}"));
         };
         let Some(total_bytes) = lane_size.checked_mul(elts.len()) else {
             self.tcx.sess.dcx().fatal(format!(

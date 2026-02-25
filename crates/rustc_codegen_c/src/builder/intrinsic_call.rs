@@ -232,10 +232,8 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
 
         // First SIMD integer binop batch supports only Int/Uint lanes.
         let (_lanes, lane_ty) = lhs_ty.simd_size_and_type(self.tcx);
-        if !matches!(
-            lane_ty.kind(),
-            rustc_type_ir::TyKind::Int(_) | rustc_type_ir::TyKind::Uint(_)
-        ) {
+        if !matches!(lane_ty.kind(), rustc_type_ir::TyKind::Int(_) | rustc_type_ir::TyKind::Uint(_))
+        {
             self.tcx.sess.dcx().span_fatal(
                 span,
                 format!(
@@ -256,7 +254,8 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
             _ => self.mcx.value(rhs),
         };
 
-        let out = self.materialize_typed_expr(vec_backend_ty, self.mcx.binary(lhs_expr, rhs_expr, op));
+        let out =
+            self.materialize_typed_expr(vec_backend_ty, self.mcx.binary(lhs_expr, rhs_expr, op));
         self.store(out, llresult.val.llval, llresult.val.align);
     }
 }
@@ -371,7 +370,8 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 Ok(())
             }
             name if self.unary_float_intrinsic_spec(name).is_some() => {
-                let (builtin_name, expected_float_ty) = self.unary_float_intrinsic_spec(name).unwrap();
+                let (builtin_name, expected_float_ty) =
+                    self.unary_float_intrinsic_spec(name).unwrap();
                 let arg = args[0].immediate();
                 self.codegen_unary_float_intrinsic(builtin_name, expected_float_ty, arg, llresult);
                 Ok(())
