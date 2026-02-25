@@ -1,7 +1,7 @@
 use rustc_abi::{Align, BackendRepr, Size};
 use rustc_codegen_c_ast::expr::{CExpr, CValue};
 use rustc_codegen_c_ast::ty::{CFloatTy, CIntTy, CTy, CUintTy};
-use rustc_codegen_ssa::common::IntPredicate;
+use rustc_codegen_ssa::common::{IntPredicate, RealPredicate};
 use rustc_codegen_ssa::mir::operand::OperandRef;
 use rustc_codegen_ssa::mir::place::PlaceRef;
 use rustc_codegen_ssa::traits::{
@@ -18,6 +18,16 @@ use crate::builder::Builder;
 enum CountZerosKind {
     Leading,
     Trailing,
+}
+
+#[derive(Clone, Copy)]
+enum SimdCmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
@@ -318,6 +328,184 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
             sym::simd_xor => "^",
             _ => return None,
         })
+    }
+
+    fn simd_cmp_op(name: rustc_span::Symbol) -> Option<SimdCmpOp> {
+        Some(match name {
+            sym::simd_eq => SimdCmpOp::Eq,
+            sym::simd_ne => SimdCmpOp::Ne,
+            sym::simd_lt => SimdCmpOp::Lt,
+            sym::simd_le => SimdCmpOp::Le,
+            sym::simd_gt => SimdCmpOp::Gt,
+            sym::simd_ge => SimdCmpOp::Ge,
+            _ => return None,
+        })
+    }
+
+    fn simd_cmp_mask_lane_values(
+        &mut self,
+        ret_lane_backend_ty: CTy<'mx>,
+    ) -> (CValue<'mx>, CValue<'mx>) {
+        match ret_lane_backend_ty {
+            CTy::UInt(_) => (
+                self.casted_integer_literal(ret_lane_backend_ty, "0"),
+                self.casted_integer_literal(ret_lane_backend_ty, ret_lane_backend_ty.max_value()),
+            ),
+            CTy::Int(_) => (
+                self.casted_integer_literal(ret_lane_backend_ty, "0"),
+                self.casted_integer_literal(ret_lane_backend_ty, "-1"),
+            ),
+            _ => panic!(
+                "SIMD compare result lane type must be integer backend type, got {ret_lane_backend_ty:?}"
+            ),
+        }
+    }
+
+    fn simd_cmp_int_predicate(op: SimdCmpOp, signed: bool) -> IntPredicate {
+        match (op, signed) {
+            (SimdCmpOp::Eq, _) => IntPredicate::IntEQ,
+            (SimdCmpOp::Ne, _) => IntPredicate::IntNE,
+            (SimdCmpOp::Lt, false) => IntPredicate::IntULT,
+            (SimdCmpOp::Le, false) => IntPredicate::IntULE,
+            (SimdCmpOp::Gt, false) => IntPredicate::IntUGT,
+            (SimdCmpOp::Ge, false) => IntPredicate::IntUGE,
+            (SimdCmpOp::Lt, true) => IntPredicate::IntSLT,
+            (SimdCmpOp::Le, true) => IntPredicate::IntSLE,
+            (SimdCmpOp::Gt, true) => IntPredicate::IntSGT,
+            (SimdCmpOp::Ge, true) => IntPredicate::IntSGE,
+        }
+    }
+
+    fn simd_cmp_float_predicate(op: SimdCmpOp) -> RealPredicate {
+        match op {
+            SimdCmpOp::Eq => RealPredicate::RealOEQ,
+            SimdCmpOp::Ne => RealPredicate::RealUNE,
+            SimdCmpOp::Lt => RealPredicate::RealOLT,
+            SimdCmpOp::Le => RealPredicate::RealOLE,
+            SimdCmpOp::Gt => RealPredicate::RealOGT,
+            SimdCmpOp::Ge => RealPredicate::RealOGE,
+        }
+    }
+
+    fn codegen_simd_cmp(
+        &mut self,
+        name: rustc_span::Symbol,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let Some(op) = Self::simd_cmp_op(name) else {
+            panic!("expected SIMD compare intrinsic, got {name}");
+        };
+
+        let lhs_ty = fn_args.type_at(0);
+        let rhs_ty = args[1].layout.ty;
+        let lhs_layout = self.layout_of(lhs_ty);
+        if !matches!(lhs_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected SIMD input type, found non-SIMD `{lhs_ty:?}`"
+                ),
+            );
+        }
+        if !matches!(args[1].layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected SIMD rhs type, found `{rhs_ty}`"
+                ),
+            );
+        }
+        if rhs_ty != lhs_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: lhs={lhs_ty:?}, rhs={rhs_ty:?}"
+                ),
+            );
+        }
+        if !matches!(llresult.layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected SIMD return type, found `{}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let (lhs_lanes, lhs_lane_ty) = lhs_ty.simd_size_and_type(self.tcx);
+        let (ret_lanes, ret_lane_ty) = llresult.layout.ty.simd_size_and_type(self.tcx);
+        if lhs_lanes != ret_lanes {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: input lane count {lhs_lanes} does not match return lane count {ret_lanes}"
+                ),
+            );
+        }
+
+        if !matches!(
+            lhs_lane_ty.kind(),
+            rustc_type_ir::TyKind::Int(_)
+                | rustc_type_ir::TyKind::Uint(_)
+                | rustc_type_ir::TyKind::Float(_)
+        ) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "`{name}` intrinsic currently supports only Int/Uint/Float SIMD input lanes in rustc_codegen_c, got `{lhs_lane_ty}`"
+                ),
+            );
+        }
+
+        let ret_lane_backend_ty = match ret_lane_ty.kind() {
+            rustc_type_ir::TyKind::Int(int) => self.mcx.get_int_type(*int),
+            rustc_type_ir::TyKind::Uint(uint) => self.mcx.get_uint_type(*uint),
+            _ => self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "`{name}` intrinsic currently supports only Int/Uint SIMD return lanes in rustc_codegen_c, got `{ret_lane_ty}`"
+                ),
+            ),
+        };
+        let (mask_false, mask_true) = self.simd_cmp_mask_lane_values(ret_lane_backend_ty);
+
+        let vec_backend_ty = self.cx.immediate_backend_type(lhs_layout);
+        let lhs = self.coerce_value_to_ty(args[0].immediate(), vec_backend_ty);
+        let rhs = self.coerce_value_to_ty(args[1].immediate(), vec_backend_ty);
+        let out_backend_ty = self.cx.immediate_backend_type(llresult.layout);
+        let out = self.simd_init_local_vector(out_backend_ty);
+
+        for lane in 0..lhs_lanes {
+            let lane_idx = self.const_usize(lane);
+            let lhs_lane = self.simd_lane_read_dyn(lhs, lane_idx, "simd_cmp");
+            let rhs_lane = self.simd_lane_read_dyn(rhs, lane_idx, "simd_cmp");
+            let cond = match lhs_lane_ty.kind() {
+                rustc_type_ir::TyKind::Int(_) => self.icmp(
+                    Self::simd_cmp_int_predicate(op, true),
+                    lhs_lane,
+                    rhs_lane,
+                ),
+                rustc_type_ir::TyKind::Uint(_) => self.icmp(
+                    Self::simd_cmp_int_predicate(op, false),
+                    lhs_lane,
+                    rhs_lane,
+                ),
+                rustc_type_ir::TyKind::Float(_) => self.fcmp(
+                    Self::simd_cmp_float_predicate(op),
+                    lhs_lane,
+                    rhs_lane,
+                ),
+                _ => unreachable!(),
+            };
+            let lane_mask = self.select(cond, mask_true, mask_false);
+            self.simd_lane_write_dyn(out, lane_idx, lane_mask, "simd_cmp");
+        }
+
+        self.store(out, llresult.val.llval, llresult.val.align);
     }
 
     fn codegen_simd_int_binop(
@@ -940,6 +1128,10 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
             }
             sym::simd_shuffle => {
                 self.codegen_simd_shuffle(fn_args, args, llresult, span);
+                Ok(())
+            }
+            name if Self::simd_cmp_op(name).is_some() => {
+                self.codegen_simd_cmp(name, fn_args, args, llresult, span);
                 Ok(())
             }
             name if Self::simd_int_binop_op(name).is_some() => {
