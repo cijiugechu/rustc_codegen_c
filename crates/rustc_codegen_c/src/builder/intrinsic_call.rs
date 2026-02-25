@@ -9,7 +9,7 @@ use rustc_codegen_ssa::traits::{
     OverflowOp,
 };
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
-use rustc_middle::ty::{GenericArgsRef, Instance};
+use rustc_middle::ty::{self, GenericArgsRef, Instance};
 use rustc_span::sym;
 
 use crate::builder::Builder;
@@ -258,6 +258,351 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
             self.materialize_typed_expr(vec_backend_ty, self.mcx.binary(lhs_expr, rhs_expr, op));
         self.store(out, llresult.val.llval, llresult.val.align);
     }
+
+    fn coerce_value_to_ty(&mut self, value: CValue<'mx>, target_ty: CTy<'mx>) -> CValue<'mx> {
+        match self.value_ty(value) {
+            Some(ty) if ty == target_ty => value,
+            _ => self
+                .materialize_typed_expr(target_ty, self.mcx.cast(target_ty, self.mcx.value(value))),
+        }
+    }
+
+    fn simd_const_u32_index(
+        &self,
+        idx: CValue<'mx>,
+        name: rustc_span::Symbol,
+        span: rustc_span::Span,
+    ) -> u64 {
+        let raw = match idx {
+            CValue::Scalar(v) | CValue::ScalarTyped(v, _) => v,
+            _ => self
+                .tcx
+                .sess
+                .dcx()
+                .span_fatal(span, format!("index argument for `{name}` must be a const u32")),
+        };
+
+        if raw < 0 || raw > u32::MAX as i128 {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!("index argument for `{name}` must fit in u32, got {raw}"),
+            );
+        }
+        raw as u64
+    }
+
+    fn simd_init_local_vector(&mut self, vec_ty: CTy<'mx>) -> CValue<'mx> {
+        let out = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(out, vec_ty, None)));
+        self.record_value_ty(out, vec_ty);
+        out
+    }
+
+    fn codegen_simd_insert(
+        &mut self,
+        name: rustc_span::Symbol,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let vec_ty = fn_args.type_at(0);
+        let lane_ty = fn_args.type_at(1);
+        let vec_layout = self.layout_of(vec_ty);
+        if !vec_ty.is_simd() || !matches!(vec_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected SIMD input type, found `{vec_ty}`"
+                ),
+            );
+        }
+        if llresult.layout.ty != vec_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: return type `{}` does not match input `{vec_ty}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let (lanes, vec_lane_ty) = vec_ty.simd_size_and_type(self.tcx);
+        if lane_ty != vec_lane_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: lane type `{lane_ty}` does not match SIMD lane `{vec_lane_ty}`"
+                ),
+            );
+        }
+        if args[2].layout.ty != lane_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: inserted value type `{}` does not match lane `{lane_ty}`",
+                    args[2].layout.ty
+                ),
+            );
+        }
+
+        let vec_backend_ty = self.cx.immediate_backend_type(vec_layout);
+        let base = self.coerce_value_to_ty(args[0].immediate(), vec_backend_ty);
+        let idx = args[1].immediate();
+        let lane = args[2].immediate();
+
+        let out = self.materialize_typed_expr(vec_backend_ty, self.mcx.value(base));
+        let lane_index = if name == sym::simd_insert {
+            let idx = self.simd_const_u32_index(idx, name, span);
+            if idx >= lanes {
+                self.tcx.sess.dcx().span_fatal(
+                    span,
+                    format!("`{name}` index {idx} is out of bounds for SIMD lane count {lanes}"),
+                );
+            }
+            self.const_usize(idx)
+        } else {
+            idx
+        };
+        self.simd_lane_write_dyn(out, lane_index, lane, "simd_insert");
+        self.store(out, llresult.val.llval, llresult.val.align);
+    }
+
+    fn codegen_simd_extract(
+        &mut self,
+        name: rustc_span::Symbol,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let vec_ty = fn_args.type_at(0);
+        let ret_ty = fn_args.type_at(1);
+        let vec_layout = self.layout_of(vec_ty);
+        if !vec_ty.is_simd() || !matches!(vec_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected SIMD input type, found `{vec_ty}`"
+                ),
+            );
+        }
+
+        let (_lanes, vec_lane_ty) = vec_ty.simd_size_and_type(self.tcx);
+        if ret_ty != vec_lane_ty || llresult.layout.ty != ret_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected return lane `{vec_lane_ty}`, got `{}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let vec_backend_ty = self.cx.immediate_backend_type(vec_layout);
+        let vec = self.coerce_value_to_ty(args[0].immediate(), vec_backend_ty);
+        let idx = args[1].immediate();
+
+        let lane_index = if name == sym::simd_extract {
+            let idx = self.simd_const_u32_index(idx, name, span);
+            let (lane_count, _) = vec_ty.simd_size_and_type(self.tcx);
+            if idx >= lane_count {
+                self.tcx.sess.dcx().span_fatal(
+                    span,
+                    format!(
+                        "`{name}` index {idx} is out of bounds for SIMD lane count {lane_count}"
+                    ),
+                );
+            }
+            self.const_usize(idx)
+        } else {
+            idx
+        };
+
+        let lane = self.simd_lane_read_dyn(vec, lane_index, "simd_extract");
+        self.store(lane, llresult.val.llval, llresult.val.align);
+    }
+
+    fn codegen_simd_shuffle_const_generic(
+        &mut self,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let in_ty = fn_args.type_at(0);
+        let out_ty = fn_args.type_at(1);
+        let in_layout = self.layout_of(in_ty);
+        if !in_ty.is_simd() || !matches!(in_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle_const_generic`: expected SIMD input type, found `{in_ty}`"
+                ),
+            );
+        }
+        if !out_ty.is_simd()
+            || !matches!(llresult.layout.backend_repr, BackendRepr::SimdVector { .. })
+        {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle_const_generic`: expected SIMD return type, found `{}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let idx = fn_args[2].expect_const().to_value().valtree.unwrap_branch();
+        let (in_lanes, in_lane_ty) = in_ty.simd_size_and_type(self.tcx);
+        let (out_lanes, out_lane_ty) = out_ty.simd_size_and_type(self.tcx);
+        if out_lane_ty != in_lane_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle_const_generic`: input lane `{in_lane_ty}` does not match return lane `{out_lane_ty}`"
+                ),
+            );
+        }
+        if out_lanes != idx.len() as u64 {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle_const_generic`: expected {out_lanes} shuffle indices, got {}",
+                    idx.len()
+                ),
+            );
+        }
+
+        let vec_backend_ty = self.cx.immediate_backend_type(in_layout);
+        let x = self.coerce_value_to_ty(args[0].immediate(), vec_backend_ty);
+        let y = self.coerce_value_to_ty(args[1].immediate(), vec_backend_ty);
+        let out_backend_ty = self.cx.immediate_backend_type(llresult.layout);
+        let out = self.simd_init_local_vector(out_backend_ty);
+        let total_lanes = in_lanes * 2;
+
+        for (out_idx, idx) in idx.iter().enumerate() {
+            let idx = idx.unwrap_leaf().to_u32() as u64;
+            if idx >= total_lanes {
+                self.tcx.sess.dcx().span_fatal(
+                    span,
+                    format!(
+                        "simd shuffle index {idx} is out of bounds for total lane count {total_lanes}"
+                    ),
+                );
+            }
+
+            let picked = if idx < in_lanes {
+                self.simd_lane_read_dyn(x, self.const_usize(idx), "simd_shuffle_const_generic")
+            } else {
+                self.simd_lane_read_dyn(
+                    y,
+                    self.const_usize(idx - in_lanes),
+                    "simd_shuffle_const_generic",
+                )
+            };
+            self.simd_lane_write_dyn(
+                out,
+                self.const_usize(out_idx as u64),
+                picked,
+                "simd_shuffle_const_generic",
+            );
+        }
+
+        self.store(out, llresult.val.llval, llresult.val.align);
+    }
+
+    fn codegen_simd_shuffle(
+        &mut self,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let in_ty = fn_args.type_at(0);
+        let idx_ty = fn_args.type_at(1);
+        let out_ty = fn_args.type_at(2);
+        let in_layout = self.layout_of(in_ty);
+        if !in_ty.is_simd() || !matches!(in_layout.backend_repr, BackendRepr::SimdVector { .. }) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!("invalid monomorphization of `simd_shuffle`: expected SIMD input type, found `{in_ty}`"),
+            );
+        }
+        if !idx_ty.is_simd() {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle`: index type must be SIMD `u32` vector, got `{idx_ty}`"
+                ),
+            );
+        }
+        let (idx_lanes, idx_lane_ty) = idx_ty.simd_size_and_type(self.tcx);
+        if !matches!(idx_lane_ty.kind(), ty::Uint(ty::UintTy::U32)) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle`: index lane type must be `u32`, got `{idx_lane_ty}`"
+                ),
+            );
+        }
+        if !out_ty.is_simd()
+            || !matches!(llresult.layout.backend_repr, BackendRepr::SimdVector { .. })
+        {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle`: expected SIMD return type, found `{}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let (in_lanes, in_lane_ty) = in_ty.simd_size_and_type(self.tcx);
+        let (out_lanes, out_lane_ty) = out_ty.simd_size_and_type(self.tcx);
+        if out_lane_ty != in_lane_ty {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle`: input lane `{in_lane_ty}` does not match return lane `{out_lane_ty}`"
+                ),
+            );
+        }
+        if out_lanes != idx_lanes {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `simd_shuffle`: return lane count {out_lanes} does not match index lane count {idx_lanes}"
+                ),
+            );
+        }
+
+        let vec_backend_ty = self.cx.immediate_backend_type(in_layout);
+        let x = self.coerce_value_to_ty(args[0].immediate(), vec_backend_ty);
+        let y = self.coerce_value_to_ty(args[1].immediate(), vec_backend_ty);
+        let idx_vec = self.coerce_value_to_ty(
+            args[2].immediate(),
+            self.cx.immediate_backend_type(self.layout_of(idx_ty)),
+        );
+        let in_lanes_usize = usize::try_from(in_lanes).unwrap_or_else(|_| {
+            self.tcx
+                .sess
+                .dcx()
+                .span_fatal(span, format!("simd_shuffle lane count {in_lanes} does not fit usize"))
+        });
+
+        let out_backend_ty = self.cx.immediate_backend_type(llresult.layout);
+        let out = self.simd_init_local_vector(out_backend_ty);
+
+        for out_idx in 0..out_lanes {
+            let lane_idx = self.const_usize(out_idx);
+            let in_idx = self.simd_lane_read_dyn(idx_vec, lane_idx, "simd_shuffle");
+            let lane = self.simd_lane_pick_dyn(x, y, in_idx, in_lanes_usize, "simd_shuffle");
+            self.simd_lane_write_dyn(out, lane_idx, lane, "simd_shuffle");
+        }
+
+        self.store(out, llresult.val.llval, llresult.val.align);
+    }
 }
 
 impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
@@ -443,6 +788,22 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 };
 
                 self.store(saturated, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
+            sym::simd_insert | sym::simd_insert_dyn => {
+                self.codegen_simd_insert(name, fn_args, args, llresult, span);
+                Ok(())
+            }
+            sym::simd_extract | sym::simd_extract_dyn => {
+                self.codegen_simd_extract(name, fn_args, args, llresult, span);
+                Ok(())
+            }
+            sym::simd_shuffle_const_generic => {
+                self.codegen_simd_shuffle_const_generic(fn_args, args, llresult, span);
+                Ok(())
+            }
+            sym::simd_shuffle => {
+                self.codegen_simd_shuffle(fn_args, args, llresult, span);
                 Ok(())
             }
             name if Self::simd_int_binop_op(name).is_some() => {

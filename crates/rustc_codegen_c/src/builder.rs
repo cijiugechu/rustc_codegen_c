@@ -384,6 +384,57 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         self.bb.func.0.push_stmt(self.mcx.expr_stmt(assign));
     }
 
+    fn simd_lane_pick_dyn(
+        &mut self,
+        lhs_vec: CValue<'mx>,
+        rhs_vec: CValue<'mx>,
+        idx: CValue<'mx>,
+        lhs_lanes: usize,
+        op: &str,
+    ) -> CValue<'mx> {
+        if lhs_lanes == 0 {
+            panic!("{op} requires non-empty SIMD vectors");
+        }
+
+        let (_lhs_vec_ty, lhs_lane_ty, lhs_lane_count) =
+            self.require_simd_vector_value_ty(lhs_vec, op);
+        let (_rhs_vec_ty, rhs_lane_ty, rhs_lane_count) =
+            self.require_simd_vector_value_ty(rhs_vec, op);
+        if lhs_lane_ty != rhs_lane_ty || lhs_lane_count != rhs_lane_count {
+            panic!(
+                "{op} expects matching SIMD input vectors, got lhs lanes={lhs_lane_count} lane_ty={lhs_lane_ty:?}, rhs lanes={rhs_lane_count} lane_ty={rhs_lane_ty:?}"
+            );
+        }
+        if lhs_lanes != lhs_lane_count {
+            panic!(
+                "{op} received inconsistent lane count: expected {lhs_lane_count}, got {lhs_lanes}"
+            );
+        }
+
+        let idx_expr = self.simd_lane_index_expr(idx);
+        let lhs_limit = self.mcx.value(self.const_usize(lhs_lanes as u64));
+        let total_limit = self.mcx.value(self.const_usize((lhs_lanes * 2) as u64));
+        let lhs_in_bounds = self.mcx.binary(idx_expr, lhs_limit, "<");
+        let total_in_bounds = self.mcx.binary(idx_expr, total_limit, "<");
+        let rhs_index = self.mcx.binary(idx_expr, lhs_limit, "-");
+
+        let lhs_lane = self.mcx.index(self.mcx.value(lhs_vec), idx_expr);
+        let rhs_lane = self.mcx.index(self.mcx.value(rhs_vec), rhs_index);
+        let fallback_lane =
+            self.mcx.index(self.mcx.value(lhs_vec), self.mcx.value(self.const_usize(0)));
+        let rhs_or_fallback = self.mcx.ternary(total_in_bounds, rhs_lane, fallback_lane);
+        let picked_lane = self.mcx.ternary(lhs_in_bounds, lhs_lane, rhs_or_fallback);
+
+        let ret = self.bb.func.0.next_local_var();
+        self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+            ret,
+            lhs_lane_ty,
+            Some(picked_lane),
+        )));
+        self.record_value_ty(ret, lhs_lane_ty);
+        ret
+    }
+
     fn infer_unchecked_integer_binop_ty(
         &self,
         lhs: CValue<'mx>,
