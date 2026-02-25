@@ -28,6 +28,38 @@ static inline unsigned int __rust_popcount_u128(unsigned __int128 value) {
     uint64_t hi = (uint64_t)(value >> 64);
     return (unsigned int)(__builtin_popcountll(lo) + __builtin_popcountll(hi));
 }
+
+static inline unsigned int __rust_ctz_nonzero_u128(unsigned __int128 value) {
+    uint64_t lo = (uint64_t)value;
+    if (lo != 0) {
+        return (unsigned int)__builtin_ctzll(lo);
+    }
+    uint64_t hi = (uint64_t)(value >> 64);
+    return (unsigned int)(64u + __builtin_ctzll(hi));
+}
+
+static inline unsigned int __rust_ctz_u128(unsigned __int128 value) {
+    if (value == 0) {
+        return 128u;
+    }
+    return __rust_ctz_nonzero_u128(value);
+}
+
+static inline unsigned int __rust_clz_nonzero_u128(unsigned __int128 value) {
+    uint64_t hi = (uint64_t)(value >> 64);
+    if (hi != 0) {
+        return (unsigned int)__builtin_clzll(hi);
+    }
+    uint64_t lo = (uint64_t)value;
+    return (unsigned int)(64u + __builtin_clzll(lo));
+}
+
+static inline unsigned int __rust_clz_u128(unsigned __int128 value) {
+    if (value == 0) {
+        return 128u;
+    }
+    return __rust_clz_nonzero_u128(value);
+}
 #endif
 
 static inline void __rust_black_box_observe(const void *ptr, size_t size) {

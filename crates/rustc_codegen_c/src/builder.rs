@@ -730,10 +730,11 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
     }
 
     fn coerce_call_arg_expr(
-        &self,
+        &mut self,
         value: CValue<'mx>,
         target_ty: CTy<'mx>,
     ) -> rustc_codegen_c_ast::expr::CExpr<'mx> {
+        self.ensure_pending_alloca_decl_for_value(value);
         let expr = self.mcx.value(value);
         let needs_cast = match self.value_ty(value) {
             Some(value_ty) => value_ty != target_ty,
@@ -754,7 +755,7 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
     }
 
     fn coerce_call_args_to_param_tys(
-        &self,
+        &mut self,
         args: &[CValue<'mx>],
         param_tys: &[CTy<'mx>],
     ) -> Vec<rustc_codegen_c_ast::expr::CExpr<'mx>> {
@@ -879,6 +880,12 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
     fn pending_alloca_bytes(&self, ptr: CValue<'mx>) -> Option<usize> {
         let fkey = self.bb.func.0 as *const _ as usize;
         self.cx.pending_allocas.borrow().get(&(fkey, ptr)).map(|slot| slot.bytes)
+    }
+
+    fn ensure_pending_alloca_decl_for_value(&mut self, value: CValue<'mx>) {
+        if self.pending_alloca_bytes(value).is_some() {
+            self.ensure_alloca_byte_array_decl(value);
+        }
     }
 
     fn c_ty_size_bytes(&self, ty: CTy<'mx>) -> Option<usize> {
@@ -2087,6 +2094,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn ptrtoint(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
+        self.ensure_pending_alloca_decl_for_value(val);
         let ret = self.bb.func.0.next_local_var();
         let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
@@ -2095,6 +2103,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn inttoptr(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
+        self.ensure_pending_alloca_decl_for_value(val);
         let ret = self.bb.func.0.next_local_var();
         let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));
@@ -2103,6 +2112,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn bitcast(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
+        self.ensure_pending_alloca_decl_for_value(val);
         let src_ty = self.value_ty(val).unwrap_or(dest_ty);
         let src_bytes = self
             .c_ty_size_bytes(src_ty)
@@ -2172,6 +2182,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
     }
 
     fn pointercast(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value {
+        self.ensure_pending_alloca_decl_for_value(val);
         let ret = self.bb.func.0.next_local_var();
         let cast = self.mcx.cast(dest_ty, self.mcx.value(val));
         self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(ret, dest_ty, Some(cast))));

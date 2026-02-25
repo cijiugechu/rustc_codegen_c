@@ -14,6 +14,12 @@ use rustc_span::sym;
 
 use crate::builder::Builder;
 
+#[derive(Clone, Copy)]
+enum CountZerosKind {
+    Leading,
+    Trailing,
+}
+
 impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
     fn materialize_typed_expr(&mut self, ty: CTy<'mx>, expr: CExpr<'mx>) -> CValue<'mx> {
         let value = self.bb.func.0.next_local_var();
@@ -80,6 +86,132 @@ impl<'tcx, 'mx> Builder<'_, 'tcx, 'mx> {
         };
         let call = self.mcx.call(self.mcx.raw(builtin_name), vec![arg_expr]);
         let out = self.materialize_typed_expr(ret_ty, call);
+        self.store(out, llresult.val.llval, llresult.val.align);
+    }
+
+    fn count_zeros_intrinsic_spec(
+        name: rustc_span::Symbol,
+    ) -> Option<(CountZerosKind, bool)> {
+        Some(match name {
+            sym::ctlz => (CountZerosKind::Leading, false),
+            sym::ctlz_nonzero => (CountZerosKind::Leading, true),
+            sym::cttz => (CountZerosKind::Trailing, false),
+            sym::cttz_nonzero => (CountZerosKind::Trailing, true),
+            _ => return None,
+        })
+    }
+
+    fn count_zeros_nonzero_u32_expr(
+        &mut self,
+        kind: CountZerosKind,
+        nonzero_intrinsic: bool,
+        bits: u64,
+        arg: CValue<'mx>,
+    ) -> CExpr<'mx> {
+        let mut builtin_bits = bits;
+        let (callee, builtin_arg_ty) = if bits <= 32 {
+            builtin_bits = 32;
+            let name = match kind {
+                CountZerosKind::Leading => "__builtin_clz",
+                CountZerosKind::Trailing => "__builtin_ctz",
+            };
+            (name, CTy::UInt(CUintTy::U32))
+        } else if bits <= 64 {
+            builtin_bits = 64;
+            let name = match kind {
+                CountZerosKind::Leading => "__builtin_clzll",
+                CountZerosKind::Trailing => "__builtin_ctzll",
+            };
+            (name, CTy::UInt(CUintTy::U64))
+        } else if bits <= 128 {
+            let name = match (kind, nonzero_intrinsic) {
+                (CountZerosKind::Leading, true) => "__rust_clz_nonzero_u128",
+                (CountZerosKind::Leading, false) => "__rust_clz_u128",
+                (CountZerosKind::Trailing, true) => "__rust_ctz_nonzero_u128",
+                (CountZerosKind::Trailing, false) => "__rust_ctz_u128",
+            };
+            (name, CTy::UInt(CUintTy::U128))
+        } else {
+            panic!("unsupported count-zeros width: {bits}");
+        };
+
+        let arg_expr = self.mcx.cast(builtin_arg_ty, self.mcx.value(arg));
+        let call = self.mcx.call(self.mcx.raw(callee), vec![arg_expr]);
+        let mut count = self.mcx.cast(CTy::UInt(CUintTy::U32), call);
+
+        // __builtin_clz/__builtin_clzll count in their full argument width.
+        if matches!(kind, CountZerosKind::Leading) && bits < builtin_bits {
+            let adjust = self.mcx.value(self.const_u32((builtin_bits - bits) as u32));
+            count = self.mcx.binary(count, adjust, "-");
+        }
+
+        count
+    }
+
+    fn codegen_count_zeros_intrinsic(
+        &mut self,
+        name: rustc_span::Symbol,
+        fn_args: GenericArgsRef<'tcx>,
+        args: &[OperandRef<'tcx, CValue<'mx>>],
+        llresult: PlaceRef<'tcx, CValue<'mx>>,
+        span: rustc_span::Span,
+    ) {
+        let Some((kind, nonzero_intrinsic)) = Self::count_zeros_intrinsic_spec(name) else {
+            panic!("expected count-zeros intrinsic, got {name}");
+        };
+
+        let arg_rust_ty = fn_args.type_at(0);
+        let arg_ty = match arg_rust_ty.kind() {
+            ty::Int(int) => self.mcx.get_int_type(*int),
+            ty::Uint(uint) => self.mcx.get_uint_type(*uint),
+            _ => self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected integer argument type, got `{arg_rust_ty}`"
+                ),
+            ),
+        };
+        let arg_unsigned_ty = match arg_ty {
+            CTy::Int(int) => CTy::UInt(int.to_unsigned()),
+            CTy::UInt(uint) => CTy::UInt(uint),
+            _ => unreachable!(),
+        };
+        let (_, bits, _) = self.integer_shape(arg_unsigned_ty).unwrap_or_else(|| {
+            panic!("unsupported count-zeros argument backend type: {arg_ty:?}")
+        });
+
+        let ret_ty = self.cx.immediate_backend_type(llresult.layout);
+        if !matches!(ret_ty, CTy::Int(_) | CTy::UInt(_)) {
+            self.tcx.sess.dcx().span_fatal(
+                span,
+                format!(
+                    "invalid monomorphization of `{name}` intrinsic: expected integer return type, got `{}`",
+                    llresult.layout.ty
+                ),
+            );
+        }
+
+        let arg = args[0].immediate();
+        let arg = self.materialize_typed_expr(
+            arg_unsigned_ty,
+            self.mcx.cast(arg_unsigned_ty, self.mcx.value(arg)),
+        );
+        let count_u32 = self.count_zeros_nonzero_u32_expr(kind, nonzero_intrinsic, bits, arg);
+        let count = self.mcx.cast(ret_ty, count_u32);
+
+        let result = if nonzero_intrinsic {
+            count
+        } else {
+            let is_zero = self.mcx.binary(
+                self.mcx.value(arg),
+                self.mcx.cast(arg_unsigned_ty, self.mcx.raw("0")),
+                "==",
+            );
+            let bit_width = self.mcx.cast(ret_ty, self.mcx.value(self.const_u32(bits as u32)));
+            self.mcx.ternary(is_zero, bit_width, count)
+        };
+
+        let out = self.materialize_typed_expr(ret_ty, result);
         self.store(out, llresult.val.llval, llresult.val.align);
     }
 
@@ -745,6 +877,10 @@ impl<'tcx, 'mx> IntrinsicCallBuilderMethods<'tcx> for Builder<'_, 'tcx, 'mx> {
                 self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(res, ret_ty, Some(init))));
                 self.record_value_ty(res, ret_ty);
                 self.store(res, llresult.val.llval, llresult.val.align);
+                Ok(())
+            }
+            name if Self::count_zeros_intrinsic_spec(name).is_some() => {
+                self.codegen_count_zeros_intrinsic(name, fn_args, args, llresult, span);
                 Ok(())
             }
             sym::saturating_add | sym::saturating_sub => {
