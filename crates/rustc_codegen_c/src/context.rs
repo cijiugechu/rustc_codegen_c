@@ -537,22 +537,13 @@ impl<'tcx, 'mx> CodegenCx<'tcx, 'mx> {
         }
     }
 
-    fn simd_lane_supported(&self, lane_ty: CTy<'mx>) -> bool {
-        matches!(lane_ty, CTy::Int(_) | CTy::UInt(_))
-    }
-
     pub(crate) fn simd_vector_ty(&self, elem: CTy<'mx>, lanes: usize, bytes: usize) -> CTy<'mx> {
         self.mcx.module().require_vector_ext();
 
         let Some((elem_size, _elem_align)) = self.c_ty_size_align(elem) else {
-            self.tcx
-                .sess
-                .dcx()
-                .fatal(format!("could not determine SIMD lane size for {elem:?}"));
+            self.tcx.sess.dcx().fatal(format!("could not determine SIMD lane size for {elem:?}"));
         };
-        if let Err(msg) =
-            validate_simd_vector_shape(lanes, bytes, elem_size, self.simd_lane_supported(elem))
-        {
+        if let Err(msg) = validate_simd_vector_shape(lanes, bytes, elem_size) {
             self.tcx
                 .sess
                 .dcx()
@@ -937,7 +928,6 @@ pub(crate) fn validate_simd_vector_shape(
     lanes: usize,
     bytes: usize,
     elem_size: usize,
-    lane_supported: bool,
 ) -> Result<(), String> {
     if lanes == 0 {
         return Err("SIMD vector lane count must be greater than zero".to_string());
@@ -947,9 +937,6 @@ pub(crate) fn validate_simd_vector_shape(
     }
     if !bytes.is_power_of_two() {
         return Err(format!("SIMD vector byte width must be a power of two, got {bytes}"));
-    }
-    if !lane_supported {
-        return Err("SIMD lowering currently supports only Int/Uint lanes".to_string());
     }
     if elem_size == 0 {
         return Err("SIMD lane type has zero size".to_string());
@@ -1042,18 +1029,12 @@ mod tests {
 
     #[test]
     fn simd_shape_validation_accepts_valid_shape() {
-        assert!(validate_simd_vector_shape(4, 16, 4, true).is_ok());
-    }
-
-    #[test]
-    fn simd_shape_validation_rejects_unsupported_lane() {
-        let err = validate_simd_vector_shape(4, 16, 4, false).unwrap_err();
-        assert!(err.contains("only Int/Uint lanes"));
+        assert!(validate_simd_vector_shape(4, 16, 4).is_ok());
     }
 
     #[test]
     fn simd_shape_validation_rejects_non_power_of_two_bytes() {
-        let err = validate_simd_vector_shape(3, 12, 4, true).unwrap_err();
+        let err = validate_simd_vector_shape(3, 12, 4).unwrap_err();
         assert!(err.contains("power of two"));
     }
 }

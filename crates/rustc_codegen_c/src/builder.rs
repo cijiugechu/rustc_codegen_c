@@ -318,6 +318,20 @@ impl<'a, 'tcx, 'mx> Builder<'a, 'tcx, 'mx> {
         }
     }
 
+    fn infer_literal_value_ty(&self, value: CValue<'mx>) -> Option<CTy<'mx>> {
+        match value {
+            CValue::RealLiteral(literal)
+                if literal.ends_with('f')
+                    || literal.contains("__builtin_nanf")
+                    || literal.contains("__builtin_inff") =>
+            {
+                Some(CTy::Float(CFloatTy::F32))
+            }
+            CValue::RealLiteral(_) => Some(CTy::Float(CFloatTy::F64)),
+            _ => None,
+        }
+    }
+
     fn infer_unchecked_integer_binop_ty(
         &self,
         lhs: CValue<'mx>,
@@ -1598,7 +1612,7 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
         ptr: Self::Value,
         align: rustc_abi::Align,
     ) -> Self::Value {
-        let val_ty = self.value_ty(val);
+        let val_ty = self.value_ty(val).or_else(|| self.infer_literal_value_ty(val));
         let normalized_val_ty = val_ty.and_then(|ty| match ty {
             CTy::Ref(kind) => match kind.0 {
                 CTyKind::Array(elem, 1) => Some(*elem),
@@ -1732,19 +1746,20 @@ impl<'a, 'tcx, 'mx> BuilderMethods<'a, 'tcx> for Builder<'a, 'tcx, 'mx> {
                 expr = self.mcx.value(cast_ptr);
             }
         }
-        if let Some(pointee) = self.pointer_pointee_ty(ptr) {
-            if pointee != ty {
-                let cast_ptr_ty = self.pointer_to(ty);
-                let cast_ptr = self.bb.func.0.next_local_var();
-                let cast = self.mcx.cast(cast_ptr_ty, expr);
-                self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
-                    cast_ptr,
-                    cast_ptr_ty,
-                    Some(cast),
-                )));
-                self.record_value_ty(cast_ptr, cast_ptr_ty);
-                expr = self.mcx.value(cast_ptr);
-            }
+        if self.pointer_pointee_ty(ptr).is_none() {
+            self.ensure_alloca_decl(ptr, Some(ty));
+        }
+        if self.pointer_pointee_ty(ptr) != Some(ty) {
+            let cast_ptr_ty = self.pointer_to(ty);
+            let cast_ptr = self.bb.func.0.next_local_var();
+            let cast = self.mcx.cast(cast_ptr_ty, expr);
+            self.bb.func.0.push_stmt(self.mcx.decl_stmt(self.mcx.var(
+                cast_ptr,
+                cast_ptr_ty,
+                Some(cast),
+            )));
+            self.record_value_ty(cast_ptr, cast_ptr_ty);
+            expr = self.mcx.value(cast_ptr);
         }
         let mut projected_ty = ty;
         let mut projected = false;

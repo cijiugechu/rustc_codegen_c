@@ -334,7 +334,9 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
         match layout.ty.kind() {
             TyKind::Bool => CTy::Bool,
             TyKind::Char => self.immediate_backend_type(layout),
-            TyKind::Int(_) | TyKind::Uint(_) => self.immediate_backend_type(layout),
+            TyKind::Int(_) | TyKind::Uint(_) | TyKind::Float(_) => {
+                self.immediate_backend_type(layout)
+            }
             TyKind::Array(elem_ty, _) => {
                 let elem_layout = self.layout_of(*elem_ty);
                 let elem = self.immediate_backend_type(elem_layout);
@@ -414,9 +416,10 @@ impl<'tcx, 'mx> LayoutTypeCodegenMethods<'tcx> for CodegenCx<'tcx, 'mx> {
 
         if let BackendRepr::SimdVector { element, count } = layout.backend_repr {
             let lanes = usize::try_from(count).unwrap_or_else(|_| {
-                self.tcx.sess.dcx().fatal(format!(
-                    "SIMD lane count does not fit usize for C lowering: {count}"
-                ))
+                self.tcx
+                    .sess
+                    .dcx()
+                    .fatal(format!("SIMD lane count does not fit usize for C lowering: {count}"))
             });
             let elem = self.scalar_backend_type(element);
             return self.simd_vector_ty(elem, lanes, layout.size.bytes_usize());
